@@ -1,8 +1,8 @@
 # -*- coding=utf -*-
 from cubes.browser import *
 from cubes.common import get_logger
-from cubes.backends.sql.common import Mapper
-from cubes.backends.sql.common import DEFAULT_KEY_FIELD
+from cubes.backends.sql.mapper import SnowflakeMapper, DenormalizedMapper
+from cubes.backends.sql.mapper import DEFAULT_KEY_FIELD
 import logging
 import collections
 
@@ -47,8 +47,8 @@ __all__ = ["StarBrowser"]
 class StarBrowser(AggregationBrowser):
     """docstring for StarBrowser"""
 
-    def __init__(self, cube, connectable=None, locale=None, dimension_prefix=None,
-                fact_prefix=None, schema=None, metadata=None, debug=False):
+    def __init__(self, cube, connectable=None, locale=None, metadata=None, 
+                 debug=False, **options):
         """StarBrowser is a SQL-based AggregationBrowser implementation that 
         can aggregate star and snowflake schemas without need of having 
         explicit view or physical denormalized table.
@@ -57,12 +57,11 @@ class StarBrowser(AggregationBrowser):
 
         * `cube` - browsed cube
         * `connectable` - SQLAlchemy connectable object (engine or connection)
-        * `dimension_prefix` - prefix for dimension tables
-        * `fact_prefix` - prefix for fact tables (`prefix`+`cube.name`)
-        * `schema` - default database schema name
         * `locale` - locale used for browsing
         * `metadata` - SQLAlchemy MetaData object
         * `debug` - output SQL to the logger at INFO level
+        * `options` - passed to the mapper and context (see their respective
+          documentation)
 
         **Limitations:**
 
@@ -77,45 +76,36 @@ class StarBrowser(AggregationBrowser):
         self.logger = get_logger()
 
         self.cube = cube
-        self.locale = locale
+        self.locale = locale or cube.model.locale
         self.debug = debug
 
         if connectable is not None:
             self.connectable = connectable
             self.metadata = metadata or sqlalchemy.MetaData(bind=self.connectable)
 
-            # Construct the fact table name:
-            # If not specified explicitly, then it is:
-            #       fact_prefix + name of the cube
-
-            fact_prefix = fact_prefix or ""
-            self.fact_name = cube.fact or fact_prefix + cube.name
-
-            # Register the fact table immediately
-            self.fact_key = self.cube.key or DEFAULT_KEY_FIELD
-
         # Mapper is responsible for finding corresponding physical columns to
         # dimension attributes and fact measures. It also provides information
         # about relevant joins to be able to retrieve certain attributes.
 
-        self.mapper = Mapper(cube, cube.mappings, self.locale,
-                                            schema=schema,
-                                            fact_name=self.fact_name,
-                                            dimension_prefix=dimension_prefix,
-                                            joins=cube.joins)
+        if options.get("use_denormalization"):
+            self.logger.debug("using denormalized mapper for cube %s (locale %s)" % (cube, locale))
+            mapper_class = DenormalizedMapper
+        else:
+            self.logger.debug("using snowflake mapper for cube %s (locale %s)" % (cube, locale))
+            mapper_class = SnowflakeMapper
+            
+        self.mapper = mapper_class(cube, locale=self.locale, **options)
 
-        # StarQueryBuilder is creating SQL statements (using SQLAlchemy). It
+        # QueryContext is creating SQL statements (using SQLAlchemy). It
         # also caches information about tables retrieved from metadata.
 
-        self.query = StarQueryBuilder(self.cube, self.mapper,
+        self.context = QueryContext(self.cube, self.mapper,
                                       metadata=self.metadata)
 
     def fact(self, key_value):
         """Get a single fact with key `key_value` from cube."""
 
-        key_column = self.query.fact_table.c[self.fact_key]
-        condition = key_column == key_value
-        select = self.query.denormalized_statement(whereclause=condition)
+        select = self.context.fact_statement(key_value)
 
         if self.debug:
             self.logger.info("fact SQL:\n%s" % select)
@@ -140,11 +130,11 @@ class StarBrowser(AggregationBrowser):
 
         # TODO: add ordering (ORDER BY)
 
-        cond = self.query.condition_for_cell(cell)
+        cond = self.context.condition_for_cell(cell)
 
-        statement = self.query.denormalized_statement(whereclause=cond.condition)
+        statement = self.context.denormalized_statement(whereclause=cond.condition)
         statement = paginated_statement(statement, page, page_size)
-        statement = ordered_statement(statement, order, mapper=self.mapper, query=self.query)
+        statement = ordered_statement(statement, order, context=self.context)
 
         if self.debug:
             self.logger.info("facts SQL:\n%s" % statement)
@@ -181,13 +171,13 @@ class StarBrowser(AggregationBrowser):
         for level in levels:
             attributes.extend(level.attributes)
 
-        cond = self.query.condition_for_cell(cell)
-        statement = self.query.denormalized_statement(whereclause=cond.condition,
+        cond = self.context.condition_for_cell(cell)
+        statement = self.context.denormalized_statement(whereclause=cond.condition,
                                                         attributes=attributes)
         statement = paginated_statement(statement, page, page_size)
-        statement = ordered_statement(statement, order, mapper=self.mapper, query=self.query)
+        statement = ordered_statement(statement, order, context=self.context)
 
-        group_by = [self.query.column(attr) for attr in attributes]
+        group_by = [self.context.column(attr) for attr in attributes]
         statement = statement.group_by(*group_by)
 
         if self.debug:
@@ -223,7 +213,7 @@ class StarBrowser(AggregationBrowser):
 
         result = AggregationResult()
 
-        summary_statement = self.query.aggregation_statement(cell=cell,
+        summary_statement = self.context.aggregation_statement(cell=cell,
                                                      measures=measures,
                                                      attributes=attributes)
 
@@ -248,7 +238,7 @@ class StarBrowser(AggregationBrowser):
         ##
 
         if drilldown:
-            statement = self.query.aggregation_statement(cell=cell,
+            statement = self.context.aggregation_statement(cell=cell,
                                                          measures=measures,
                                                          attributes=attributes,
                                                          drilldown=drilldown)
@@ -257,7 +247,7 @@ class StarBrowser(AggregationBrowser):
                 self.logger.info("aggregation drilldown SQL:\n%s" % statement)
 
             statement = paginated_statement(statement, page, page_size)
-            statement = ordered_statement(statement, order, mapper=self.mapper, query=self.query)
+            statement = ordered_statement(statement, order, context=self.context)
 
             dd_result = self.connectable.execute(statement)
             labels = [c.name for c in statement.columns]
@@ -306,7 +296,7 @@ class StarBrowser(AggregationBrowser):
                 issues.append(("join", "master column not specified", join))
             if not join.detail.table:
                 issues.append(("join", "detail table not specified", join))
-            elif join.detail.table == self.fact_name:
+            elif join.detail.table == self.mapper.fact_name:
                 issues.append(("join", "detail table should not be fact table", join))
 
             master_table = (join.master.schema, join.master.table)
@@ -369,12 +359,11 @@ aggregation_functions = {
     "count": sql.functions.count
 }
 
-# TODO: Rename StarQueryBuilder to QueryContext
+class QueryContext(object):
 
-class StarQueryBuilder(object):
-    """StarQuery"""
     def __init__(self, cube, mapper, metadata, **options):
-        """Object representing queries to the star. `mapper` is used for
+        """Object providing context for constructing queries. Puts together
+        the mapper and physical structure. `mapper` - which is used for
         mapping logical to physical attributes and performing joins.
         `metadata` is a `sqlalchemy.MetaData` instance for getting physical
         table representations.
@@ -399,7 +388,7 @@ class StarQueryBuilder(object):
             in SQLite database. SQLite engine does not respect dots in column
             names which results in "duplicate column name" error.
         """
-        super(StarQueryBuilder, self).__init__()
+        super(QueryContext, self).__init__()
 
         self.logger = get_logger()
 
@@ -410,6 +399,7 @@ class StarQueryBuilder(object):
 
         # Prepare physical fact table - fetch from metadata
         #
+        self.fact_key = self.cube.key or DEFAULT_KEY_FIELD
         self.fact_name = mapper.fact_name
         self.fact_table = sqlalchemy.Table(self.fact_name, self.metadata,
                                            autoload=True, schema=self.schema)
@@ -502,19 +492,25 @@ class StarQueryBuilder(object):
 
         return result
 
-    def denormalized_statement(self, whereclause=None, attributes=None):
+    def denormalized_statement(self, whereclause=None, attributes=None,
+                                expand_locales=False):
         """Return a statement (see class description for more information) for
         denormalized view. `whereclause` is same as SQLAlchemy `whereclause`
         for `sqlalchemy.sql.expression.select()`. `attributes` is list of
         logical references to attributes to be selected. If it is ``None`` then
-        all attributes are used."""
+        all attributes are used.
+        
+        Set `expand_locales` to ``True`` to expand all localized attributes.
+        """
 
         if attributes is None:
             attributes = self.mapper.all_attributes()
 
-        join_expression = self.join_expression_for_attributes(attributes)
+        join_expression = self.join_expression_for_attributes(attributes, expand_locales=expand_locales)
 
-        columns = [self.column(attr) for attr in attributes]
+        columns = self.columns(attributes, expand_locales=expand_locales)
+        key_column = self.fact_table.c[self.fact_key].label(self.fact_key)
+        columns.insert(0, key_column)
 
         select = sql.expression.select(columns,
                                     whereclause=whereclause,
@@ -522,11 +518,19 @@ class StarQueryBuilder(object):
                                     use_labels=True)
 
         return select
+        
+    def fact_statement(self, key_value):
+        """Return a statement for selecting a single fact based on `key_value`"""
 
+        key_column = self.fact_table.c[self.fact_key]
+        condition = key_column == key_value
+        return self.denormalized_statement(whereclause=condition)
+        
 
-    def join_expression_for_attributes(self, attributes):
+    def join_expression_for_attributes(self, attributes, expand_locales=False):
         """Returns a join expression for `attributes`"""
-        physical_references = self.mapper.map_attributes(attributes)
+        physical_references = self.mapper.map_attributes(attributes, expand_locales=expand_locales)
+
         joins = self.mapper.relevant_joins(physical_references)
         return self.join_expression(joins)
 
@@ -678,16 +682,35 @@ class StarQueryBuilder(object):
         self.tables[table_ref] = table
         return table
 
-    def column(self, attribute):
-        """Return a column object for attribute"""
+    def column(self, attribute, locale=None):
+        """Return a column object for attribute. `locale` is explicit locale
+        to be used. If not specified, then the current browsing/mapping locale
+        is used for localizable attributes."""
 
-        ref = self.mapper.physical(attribute)
+        ref = self.mapper.physical(attribute, locale)
         table = self.table(ref.schema, ref.table)
 
         column = table.c[ref.column]
-        column = column.label(self.mapper.logical(attribute))
+        column = column.label(self.mapper.logical(attribute, locale))
 
         return column
+        
+    def columns(self, attributes, expand_locales=False):
+        """Returns list of columns.If `expand_locales` is True, then one
+        column per attribute locale is added."""
+
+        if expand_locales:
+            columns = []
+            for attr in attributes:
+                if attr.locales:
+                    columns += [self.column(attr, locale) for locale in attr.locales]
+                else: # if not attr.locales
+                    columns.append(self.column(attr))
+        else:
+            columns = [self.column(attr) for attr in attributes]
+            
+        return columns
+            
 
 def coalesce_drilldown(cell, drilldown):
     """Returns a dictionary where keys are dimensions and values are list of
@@ -754,7 +777,7 @@ def paginated_statement(statement, page, page_size):
     else:
         return statement
 
-def ordered_statement(statement, order, mapper, query):
+def ordered_statement(statement, order, context):
     """Returns a SQL statement which is ordered according to the `order`. If
     the statement contains attributes that have natural order specified, then
     the natural order is used, if not overriden in the `order`."""
@@ -775,8 +798,8 @@ def ordered_statement(statement, order, mapper, query):
     for item in order:
         if isinstance(item, basestring):
             try:
-                attribute = mapper.attribute(item)
-                column = query.column(attribute)
+                attribute = context.mapper.attribute(item)
+                column = context.column(attribute)
             except KeyError:
                 column = selection[item]
 
@@ -785,8 +808,8 @@ def ordered_statement(statement, order, mapper, query):
             # item is a two-element tuple where first element is attribute
             # name and second element is ordering
             try:
-                attribute = mapper.attribute(item[0])
-                column = query.column(attribute)
+                attribute = context.mapper.attribute(item[0])
+                column = context.column(attribute)
             except KeyError:
                 column = selection[item[0]]
             order_by[item] = order_column(column, item[1])
@@ -800,7 +823,7 @@ def ordered_statement(statement, order, mapper, query):
         try:
             # Backward mapping: get Attribute instance by name. The column
             # name used here is already labelled to the logical name
-            attribute = mapper.attribute(name)
+            attribute = context.mapper.attribute(name)
         except KeyError:
             # Since we are already selecting the column, then it should exist
             # this exception is raised when we are trying to get Attribute
@@ -854,7 +877,6 @@ class ResultIterator(object):
 ####
 # Backend related functions
 ###
-
 def ddl_for_model(url, model, fact_prefix=None, dimension_prefix=None, schema_type=None):
     """Create a star schema DDL for a model.
 
@@ -890,42 +912,137 @@ def create_workspace(model, config):
     except KeyError:
         raise Exception("No URL specified in configuration")
 
-    schema = config.get("schema")
-    dimension_prefix = config.get("dimension_prefix")
-    fact_prefix = config.get("fact_prefix")
+    # schema = config.get("schema")
+    # dimension_prefix = config.get("dimension_prefix")
+    # fact_prefix = config.get("fact_prefix")
 
     engine = sqlalchemy.create_engine(dburl)
 
-    workspace = SQLStarWorkspace(model, engine, schema,
-                                    dimension_prefix = dimension_prefix,
-                                    fact_prefix = fact_prefix)
+    workspace = SQLStarWorkspace(model, engine, **config)
 
     return workspace
 
 class SQLStarWorkspace(object):
     """Factory for browsers"""
-    def __init__(self, model, engine, schema=None, dimension_prefix=None,
-                 fact_prefix=None):
-        """Create a workspace"""
+    def __init__(self, model, engine, **options):
+        """Create a workspace. For description of options see the StarBrowser
+        class.
+        """
+
         super(SQLStarWorkspace, self).__init__()
+
+        self.logger = get_logger()
+
         self.model = model
         self.engine = engine
-        self.metadata = sqlalchemy.MetaData(bind = self.engine)
-        self.dimension_prefix = dimension_prefix
-        self.fact_prefix = fact_prefix
-        self.schema = schema
-
+        self.schema = options.get("schema")
+        self.metadata = sqlalchemy.MetaData(bind=self.engine,schema=self.schema)
+        self.options = options
+        
     def browser_for_cube(self, cube, locale=None):
-        """Creates, configures and returns a browser for a cube"""
+        """Creates, configures and returns a browser for a cube.
+        
+        .. note::
+            
+            Use `workspace.browser()` instead.
+        """
 
         # TODO(Stiivi): make sure that we are leaking connections here
+        self.logger.info("workspace.create_browser() is depreciated, use "
+                         ".browser() instead")
+
+        return self.browser(cube, locale)
+
+    def browser(self, cube, locale=None):
+        """Returns a browser for a cube."""
         cube = self.model.cube(cube)
         browser = StarBrowser(cube, self.engine, locale=locale,
-                                dimension_prefix=self.dimension_prefix,
-                                fact_prefix=self.fact_prefix,
-                                schema=self.schema,
-                                metadata=self.metadata)
+                              metadata=self.metadata,
+                              **self.options)
         return browser
+
+    def create_denormalized_view(self, cube, view_name, materialize=False, 
+                                 replace=False, create_index=False, 
+                                 keys_only=False):
+        """Creates a denormalized view named `view_name` of a `cube`. Options:
+        
+        * `materialize` - whether the view is materialized (a table) or
+          regular view
+        * `replace` - if `True` then existing table/view will be replaced,
+          otherwise an exception is raised when trying to create view/table
+          with already existing name
+        * `create_index` - if `True` then index is created for each key
+          attribute. Can be used only on materialized view, otherwise raises
+          an exception
+        * `keys_only` - if ``True`` then only key attributes are used in the
+          view, all other detail attributes are ignored            
+        """
+
+        cube = self.model.cube(cube)
+
+        mapper = SnowflakeMapper(cube, cube.mappings, **self.options)
+        context = QueryContext(cube, mapper, metadata=self.metadata)
+
+        key_attributes = []
+        for dim in cube.dimensions:
+            key_attributes += dim.key_attributes()
+
+        if keys_only:
+            statement = context.denormalized_statement(attributes=key_attributes, expand_locales=True)
+        else:
+            statement = context.denormalized_statement(expand_locales=True)
+
+        table = sqlalchemy.Table(view_name, self.metadata,
+                                 autoload=False, schema=self.schema)
+
+        full_name = "%s.%s" % (self.schema, view_name) if self.schema else view_name
+
+        if table.exists():
+            if not replace:
+                raise Exception("Table %s (schema: %s) already exists. "
+                                "Use replace=True to force creation" % \
+                                (view_name, self.schema))
+
+            inspector = sqlalchemy.engine.reflection.Inspector.from_engine(self.engine)
+            view_names = inspector.get_view_names(schema=self.schema)
+
+            if view_name in view_names:
+                # Table reflects a view
+                drop_statement = "DROP VIEW %s" % full_name
+                self.engine.execute(drop_statement)
+            else:
+                # Table reflects a table
+                table.drop(checkfirst=False)
+
+        if materialize:
+            create_stat = "CREATE TABLE"
+        else:
+            create_stat = "CREATE OR REPLACE VIEW"
+
+        statement = "%s %s AS %s" % (create_stat, full_name, str(statement))
+        self.logger.info("creating denormalized view %s (materialized: %s)" \
+                                            % (full_name, materialize))
+        # print("SQL statement:\n%s" % statement)
+        self.engine.execute(statement)
+
+        if create_index:
+            if not materialize:
+                raise Exception("Index can be created only on materialized view")
+                
+            # self.metadata.reflect(schema = schema, only = [view_name] )
+            table = sqlalchemy.Table(view_name, self.metadata,
+                                     autoload=True, schema=self.schema)
+            self.engine.reflecttable(table)
+
+            for attribute in key_attributes:
+                label = attribute.full_name()
+                self.logger.info("creating index for %s" % label)
+                column = table.c[label]
+                name = "idx_%s_%s" % (view_name, label)
+                index = sqlalchemy.schema.Index(name, column)
+                index.create(self.engine)
+
+        return statement
 
     def validate_model(self):
         """Validate physical representation of model. Returns a list of 

@@ -144,6 +144,7 @@ class StarSQLAttributeMapperTestCase(StarSQLTestCase):
         attr = cubes.Attribute("category",dimension=self.model.dimension("product"))
         self.assertEqual("product.category", self.mapper.logical(attr))
 
+        self.assertEqual(True, self.mapper.simplify_dimension_references)
         attr = cubes.Attribute("flag",dimension=self.model.dimension("flag"))
         self.assertEqual("flag", self.mapper.logical(attr))
 
@@ -183,7 +184,7 @@ class StarSQLAttributeMapperTestCase(StarSQLTestCase):
         explicit default prefix) in physical references."""
 
         # No dimension prefix
-        self.mapper.dimension_table_prefix = None
+        self.mapper.dimension_prefix = None
         dim = self.model.dimension("product")
         self.assertMapping("date.year", "date.year")
         self.assertMapping("sales.flag", "flag")
@@ -191,12 +192,12 @@ class StarSQLAttributeMapperTestCase(StarSQLTestCase):
         # self.assertEqual("fact.flag", sref("flag.flag"))
 
         # With prefix
-        self.mapper.dimension_table_prefix = "dm_"
+        self.mapper.dimension_prefix = "dm_"
         self.assertMapping("dm_date.year", "date.year")
         self.assertMapping("dm_date.month_name", "date.month_name")
         self.assertMapping("sales.flag", "flag")
         self.assertMapping("sales.amount", "amount")
-        self.mapper.dimension_table_prefix = None
+        self.mapper.dimension_prefix = None
 
     def test_coalesce_physical(self):
         def assertPhysical(expected, actual, default=None):
@@ -244,7 +245,22 @@ class StarSQLAttributeMapperTestCase(StarSQLTestCase):
         self.assertMapping("dim_category.subcategory_name_en", "product.subcategory_name")
         self.assertMapping("dim_category.subcategory_name_sk", "product.subcategory_name", "sk")
         self.assertMapping("dim_category.subcategory_name_en", "product.subcategory_name", "de")
-                
+
+class QueryContextTestCase(StarSQLTestCase):
+    def setUp(self):
+        super(QueryContextTestCase, self).setUp()
+        
+    def test_denormalize(self):
+        statement = self.browser.context.denormalized_statement()
+        cols = [column.name for column in statement.columns]
+        self.assertEqual(18, len(cols))
+
+    def test_denormalize_locales(self):
+        """Denormalized view should have all locales expanded"""
+        statement = self.browser.context.denormalized_statement(expand_locales=True)
+        cols = [column.name for column in statement.columns]
+        self.assertEqual(20, len(cols))
+        
 class JoinsTestCase(StarSQLTestCase):
     def setUp(self):
         super(JoinsTestCase, self).setUp()
@@ -364,9 +380,10 @@ class StarSQLBrowserTestCase(StarSQLTestCase):
     
     def test_get_fact(self):
         """Get single fact"""
+        self.assertEqual(True, self.mapper.simplify_dimension_references)
         fact = self.browser.fact(1)
         self.assertIsNotNone(fact)
-        self.assertEqual(17, len(fact.keys()))
+        self.assertEqual(18, len(fact.keys()))
 
     def test_get_values(self):
         """Get dimension values"""
@@ -425,12 +442,12 @@ class StarSQLBrowserTestCase(StarSQLTestCase):
                         ], details)
         
     def test_aggregation_for_measures(self):
-        query = self.browser.query
+        context = self.browser.context
 
-        aggs = query.aggregations_for_measure(self.cube.measure("amount"))
+        aggs = context.aggregations_for_measure(self.cube.measure("amount"))
         self.assertEqual(2, len(aggs))
 
-        aggs = query.aggregations_for_measure(self.cube.measure("discount"))
+        aggs = context.aggregations_for_measure(self.cube.measure("discount"))
         self.assertEqual(1, len(aggs))
 
     def test_aggregate(self):
@@ -491,5 +508,6 @@ def suite():
     suite.addTest(unittest.makeSuite(JoinsTestCase))
     suite.addTest(unittest.makeSuite(StarSQLBrowserTestCase))
     suite.addTest(unittest.makeSuite(StarValidationTestCase))
+    suite.addTest(unittest.makeSuite(QueryContextTestCase))
 
     return suite
