@@ -1,7 +1,7 @@
 """Logical model."""
 
-# FIXME: Model constructors contain lots of default initializations. This should be moved to some other
-# place or made optional by a flag
+# FIXME: Model constructors contain lots of default initializations. This
+# should be moved to some other place or made optional by a flag
 
 import os
 import re
@@ -43,8 +43,8 @@ class ModelError(Exception):
     pass
 
 def load_model(resource, translations = None):
-    """Load logical model from object reference. `resource` can be an URL, local file path or file-like
-    object.
+    """Load logical model from object reference. `resource` can be an URL,
+    local file path or file-like object.
 
     The ``path`` might be:
 
@@ -82,14 +82,8 @@ def load_model(resource, translations = None):
     return model
 
 def model_from_path(path):
-    """Load logical model from a directory specified by path
-
-    Argrs:
-        path: directory where model is located
-
-    Returs:
-        instance of Model
-    """
+    """Load logical model from a file or a directory specified by `path`.
+    Returs instance of `Model`. """
 
     # FIXME: refactor this/merge with load_model
 
@@ -148,13 +142,8 @@ def model_from_path(path):
     return model_from_dict(model_desc)
 
 def _model_desc_from_json_file(object_path):
-    """Get a dictionary from reading model json file
-
-    Args:
-        pbject_path: path within model directory
-
-    Returs:
-        dict object
+    """Get a dictionary from reading model json file at `object_path`.
+    Returs a dictionary from the file.
     """
     a_file = open(object_path)
     try:
@@ -172,12 +161,13 @@ class Model(object):
         """
         Logical Model represents analysts point of view on data.
 
-        The `model` dictionary contains main model description. The structure is::
+        The `model` dictionary contains main model description. The structure
+        is::
 
             {
             	"name": "public_procurements",
-            	"label": "Public Procurements of Slovakia",
-            	"description": "Contracts of public procurement winners in Slovakia"
+            	"label": "Procurements",
+            	"description": "Procurement Contracts of an Organisation"
             	"cubes": {...}
             	"dimensions": {...}
             }
@@ -191,8 +181,8 @@ class Model(object):
         * `dimensions` - dictionary of dimension descriptions (see below)
         * `locale` - locale code of the model
 
-        When initializing the ``Model`` object, `cubes` and `dimensions` might be
-        dictionaries with descriptions. See `Cube` and `Dimension` for more
+        When initializing the ``Model`` object, `cubes` and `dimensions` might
+        be dictionaries with descriptions. See `Cube` and `Dimension` for more
         information.
         """
 
@@ -251,12 +241,14 @@ class Model(object):
         self.translations = {}
 
     def add_cube(self, cube):
-        """Adds cube to the model and also assigns the model to the cube. If cube has a model assigned
-        and it is not this model, then error is raised.
+        """Adds cube to the model and also assigns the model to the cube. If
+        cube has a model assigned and it is not this model, then error is
+        raised.
 
-        Cube's dimensions are collected to the model. If cube has a dimension with same name as one of
-        existing model's dimensions, but has different structure, an exception is raised. Dimensions
-        in cube should be the same as in model.
+        Cube's dimensions are collected to the model. If cube has a dimension
+        with same name as one of existing model's dimensions, but has
+        different structure, an exception is raised. Dimensions in cube should
+        be the same as in model.
         """
         if cube.model and cube.model != self:
             raise ModelError("Trying to assign a cube with different model (%s) to model %s" %
@@ -316,14 +308,13 @@ class Model(object):
             raise ModelError("Unknown dimension '%s' in model '%s'" % (obj, self.name))
 
     def to_dict(self, **options):
-        """Return dictionary representation of the model. All object references within the dictionary are
-        name based
+        """Return dictionary representation of the model. All object
+        references within the dictionary are name based
 
-        Options:
-
-            * `expand_dimensions` - if set to True then fully expand dimension information in cubes
-            * `full_attribute_names` - if set to True then attribute names will be written as
-              ``dimension_name.attribute_name``
+        * `expand_dimensions` - if set to True then fully expand dimension
+          information in cubes
+        * `full_attribute_names` - if set to True then attribute names will be
+          written as ``dimension_name.attribute_name``
         """
 
         out = IgnoringDictionary()
@@ -347,8 +338,9 @@ class Model(object):
         return out
 
     def validate(self):
-        """Validate the model, check for model consistency. Validation result is array of tuples in form:
-        (validation_result, message) where validation_result can be 'warning' or 'error'.
+        """Validate the model, check for model consistency. Validation result
+        is array of tuples in form: (validation_result, message) where
+        validation_result can be 'warning' or 'error'.
 
         Returs: array of tuples
         """
@@ -382,14 +374,13 @@ class Model(object):
         return results
 
     def is_valid(self, strict = False):
-        """Check whether model is valid. Model is considered valid if there are no validation errors. If you want
-        to be sure that there are no warnings as well, set *strict* to ``True``.
+        """Check whether model is valid. Model is considered valid if there
+        are no validation errors. If you want to be sure that there are no
+        warnings as well, set *strict* to ``True``. If `strict` is ``False``
+        only errors are considered fatal, if ``True`` also warnings will make
+        model invalid.
 
-        Args:
-            * strict: If ``False`` only errors are considered fatal, if ``True`` also warnings will make model invalid.
-
-        Returns:
-            boolean flag whether model is valid or not.
+        Returns ``True`` when model is valid, otherwise returns ``False``.
         """
         results = self.validate()
         if not results:
@@ -453,56 +444,51 @@ class Model(object):
 class Cube(object):
     """
     OLAP Cube
-
-    Attributes:
-
-	* name: cube name
-	* model: logical model cube belongs to
-	* label: name that will be displayed (human readable)
-	* measures: list of fact measures
-	* details: list attributes that give more information about facts, but are not relevant
-      from analysis or aggregation point of view in this context
-	* dimensions: list of fact dimensions
-
-    Backend specific attributes:
-
-	* mappings: map logical attributes to physical dataset fields (table columns)
-	* joins: specification of physical table joins (order matters)
-    * fact: dataset containing facts (fact table)
-    * key: fact key field (if not specified, then backend default key will be used, mostly
-      ``id`` for SLQ or ``_id`` for document based databases)
-
-    Initialization defaults:
-
-    * ``measures`` and details might be a list of attribute names as strings
-    * ``dimensions`` might be either list of dimension names that are defined in ``model`` or might be
-      dimension descriptions represented as a dictionary
-
-
-    In file based model representation, the cube descriptions are stored in json files with prefix
-    ``cube_`` like ``cube_contracts``, or as a dictionary for key ``cubes`` in the model description
-    dictionary.
-
-    JSON example::
-
-        {
-            "name": "contracts",
-
-            "measures": ["amount"],
-            "dimensions": [ "date", "contractor", "type"]
-            "details": ["contract_name"],
-        }
-
     """
 
     def __init__(self, name=None, model=None, label=None, measures=None,
                  details=None, dimensions=None, mappings=None, joins=None,
                  fact=None, key=None, description=None, options=None, **kwargs):
-        """Create a new cube
+        """Create a new OLAP Cube
 
-        Args:
-            * name (str): dimension name
-            * desc (dict): dict object containing keys label, description, dimensions, ...
+        Attributes:
+
+        * `name`: dimension name
+        * `model`: model the cube belongs to
+        * `label`: human readable cube label
+        * `measures`: list of measure attributes
+        * `details`: list of detail attributes
+        * `dimensions`: list of dimensions or dimension names. They should
+          be present in the `model`.
+        * `description` - human readable description of the cube
+        * `key`: fact key field (if not specified, then backend default key
+          will be used, mostly ``id`` for SLQ or ``_id`` for document based
+          databases)
+
+        Attributes used by backends:
+
+        * `mappings` - backend-specific logical to physical mapping
+          dictionary
+        * `joins` - backend-specific join specification (used in SQL
+          backend)
+        * `fact` - fact dataset (table) name (physical reference)
+        * `options` - dictionary of other options used by the backend - refer
+          to the backend documentation to see what options are used (for
+          example SQL browser might look here for ``denormalized_view`` in
+          case of denormalized browsing)
+            
+        In file based model representation, the cube descriptions are stored
+        in json files with prefix ``cube_`` like ``cube_contracts``, or as a
+        dictionary for key ``cubes`` in the model description dictionary.
+
+        JSON example::
+
+            {
+                "name": "contracts",
+                "measures": ["amount"],
+                "dimensions": [ "date", "contractor", "type"]
+                "details": ["contract_name"],
+            }
         """
         self.name = name
 
@@ -550,7 +536,9 @@ class Cube(object):
         self._dimensions[dimension.name] = dimension
 
     def remove_dimension(self, dimension):
-        """Remove a dimension from receiver. `dimension` can be either dimension name or dimension object."""
+        """Remove a dimension from receiver. `dimension` can be either
+        dimension name or dimension object."""
+
         dim = self.dimension(dimension)
         del self._dimensions[dim.name]
 
@@ -559,8 +547,9 @@ class Cube(object):
         return self._dimensions.values()
 
     def dimension(self, obj):
-        """Get dimension object. If `obj` is a string, then dimension with given name is returned, otherwise
-        dimension object is returned if it belongs to the cube."""
+        """Get dimension object. If `obj` is a string, then dimension with
+        given name is returned, otherwise dimension object is returned if it
+        belongs to the cube."""
 
         if isinstance(obj, basestring):
             if obj in self._dimensions:
@@ -595,13 +584,13 @@ class Cube(object):
             raise ModelError("Invalid measure or measure reference '%s' for cube '%s'" %
                                     (obj, self.name))
 
-    def to_dict(self, expand_dimensions = False, with_mappings = True, **options):
-        """Convert to dictionary
-
-        Options:
-
-            * `expand_dimensions` - if set to True then fully expand dimension information
-
+    def to_dict(self, expand_dimensions=False, with_mappings=True, **options):
+        """Convert to a dictionary. If `expand_dimensions` is ``True``
+        (default is ``False``) then fully expand dimension information If
+        `with_mappings` is ``True`` (which is default) then `joins`,
+        `mappings`, `fact` and `options` are included. Should be set to
+        ``False`` when returning a dictionary that will be provided in an user
+        interface or through server API.
         """
 
         out = IgnoringDictionary()
@@ -629,6 +618,7 @@ class Cube(object):
             out.setnoempty("mappings", self.mappings)
             out.setnoempty("fact", self.fact)
             out.setnoempty("joins", self.joins)
+            out.setnoempty("options", self.options)
 
         out.setnoempty("key", self.key)
 
@@ -641,13 +631,30 @@ class Cube(object):
         # Check whether all attributes, measures and keys are Attribute objects
         # This is internal consistency chceck
 
+        measures = set()
+
         for measure in self.measures:
             if not isinstance(measure, Attribute):
                 results.append( ('error', "Measure '%s' in cube '%s' is not instance of Attribute" % (measure, self.name)) )
+            if str(measure) in measures:
+                results.append( ('error', "Duplicate measure '%s' in cube '%s'"\
+                                            % (measure, self.name)) )
+            else:
+                measures.add(str(measure))
 
+        details = set()
         for detail in self.details:
             if not isinstance(detail, Attribute):
-                results.append( ('error', "Detail '%s' in cube '%s' is not instance of Attribute" % (measure, self.name)) )
+                results.append( ('error', "Detail '%s' in cube '%s' is not instance of Attribute" % (detail, self.name)) )
+            if str(detail) in details:
+                results.append( ('error', "Duplicate detail '%s' in cube '%s'"\
+                                            % (detail, self.name)) )
+            elif str(detail) in measures:
+                results.append( ('error', "Duplicate detail '%s' in cube '%s'"
+                                          " - specified also as measure" \
+                                            % (detail, self.name)) )
+            else:
+                details.add(str(detail))
 
         # 2. check whether dimension attributes are unique
 
@@ -690,33 +697,34 @@ class Dimension(object):
     """
     Cube dimension.
 
-    Attributes:
-
-	* `name`: dimension name
-	* `label`: dimension name that will be displayed (human readable)
-	* `levels`: list of dimension levels (see: :class:`brewery.cubes.Level`)
-	* `hierarchies`: list of dimension hierarchies
-	* `default_hierarchy_name`: name of a hierarchy that will be used when no
-      hierarchy is explicitly specified
-
-    **Defaults**
-
-    * If no levels are specified during initialization, then dimension name is
-      considered flat, with single attribute.
-    * If no hierarchy is specified and levels are specified, then default
-      hierarchy will be created from order of levels
-    * If no levels are specified, then one level is created, with name
-      `default` and dimension will be considered flat
-
-    String representation of a dimension ``str(dimension)`` is equal to
-    dimension name.
-
-    Class is not meant to be mutable.
     """
 
     def __init__(self, name=None, label=None, levels=None,
                  attributes=None, hierarchy=None, description=None, **desc):
         """Create a new dimension
+
+        Attributes:
+
+    	* `name`: dimension name
+    	* `label`: dimension name that will be displayed (human readable)
+    	* `levels`: list of dimension levels (see: :class:`cubes.Level`)
+    	* `hierarchies`: list of dimension hierarchies
+    	* `default_hierarchy_name`: name of a hierarchy that will be used when
+          no hierarchy is explicitly specified
+
+        **Defaults**
+
+        * If no levels are specified during initialization, then dimension
+          name is considered flat, with single attribute.
+        * If no hierarchy is specified and levels are specified, then default
+          hierarchy will be created from order of levels
+        * If no levels are specified, then one level is created, with name
+          `default` and dimension will be considered flat
+
+        String representation of a dimension ``str(dimension)`` is equal to
+        dimension name.
+
+        Class is not meant to be mutable.
         """
         self.name = name
 
@@ -758,7 +766,8 @@ class Dimension(object):
         hierarchies = desc.get("hierarchies")
 
         if hierarchy and hierarchies:
-            raise ModelError("Both 'hierarchy' and 'hierarchies' specified. Use only one")
+            raise ModelError("Both 'hierarchy' and 'hierarchies' specified. "
+                             "Use only one")
 
         if hierarchy:
             if type(hierarchy) == list or type(hierarchy) == tuple:
@@ -810,14 +819,15 @@ class Dimension(object):
 
     @property
     def has_details(self):
-        """Returns ``True`` when each level has only one attribute, usually key."""
+        """Returns ``True`` when each level has only one attribute, usually
+        key."""
 
         return any([level.has_details for level in self._levels.values()])
 
     @property
     def levels(self):
-        """Get list of all dimension levels. Order is not guaranteed, use a hierarchy
-        to have known order."""
+        """Get list of all dimension levels. Order is not guaranteed, use a
+        hierarchy to have known order."""
         return self._levels.values()
 
     @property
@@ -849,7 +859,7 @@ class Dimension(object):
             return self.default_hierarchy
         if isinstance(obj, basestring):
             if obj not in self.hierarchies:
-                raise KeyError("No level %s in dimension %s" % (obj, self.name))
+                raise KeyError("No hierarchy %s in dimension %s" % (obj, self.name))
             return self.hierarchies[obj]
         elif isinstance(obj, Hierarchy):
             return obj
@@ -858,8 +868,8 @@ class Dimension(object):
 
     @property
     def default_hierarchy(self):
-        """Get default hierarchy specified by ``default_hierarchy_name``, if the variable is not set then
-        get a hierarchy with name *default*
+        """Get default hierarchy specified by ``default_hierarchy_name``, if
+        the variable is not set then get a hierarchy with name *default*
         
         .. warning::
         
@@ -908,7 +918,8 @@ class Dimension(object):
         return len(self.levels) == 1
 
     def attribute_reference(self, attribute, locale=None):
-        """Return an Attribute object if it is a string, otherwise just return the object."""
+        """Return an Attribute object if it is a string, otherwise just return
+        the object."""
         if isinstance(attribute, basestring):
             attr = Attribute(attribute,locale=locale)
             return attr.full_name(dimension=self)
@@ -916,8 +927,8 @@ class Dimension(object):
             return attribute.full_name(dimension=self)
 
     def key_attributes(self):
-        """Return all dimension key attributes, regardless of hierarchy. Order is not guaranteed, use a hierarchy
-        to have known order."""
+        """Return all dimension key attributes, regardless of hierarchy. Order
+        is not guaranteed, use a hierarchy to have known order."""
 
         return [level.key for level in self._levels.values()]
 
@@ -965,35 +976,38 @@ class Dimension(object):
         """Validate dimension. See Model.validate() for more information. """
         results = []
 
-        skip_hierarchy_check = False
         if not self.levels:
-            skip_hierarchy_check = True
-            results.append( ('error', "No attributes or levels in dimension '%s'" % (self.name)) )
+            results.append( ('error', "No levels in dimension '%s'" \
+                                        % (self.name)) )
+            return results
 
-        if not skip_hierarchy_check:
-            if not self.hierarchies:
-                base = "No hierarchies in dimension '%s'" % (self.name)
-                if self.is_flat:
-                    level = self.levels[0]
-                    results.append( ('default', base + ", flat level '%s' will be used" % (level.name)) )
-                elif len(self.levels) > 1:
-                    results.append( ('error', base + ", more than one levels exist (%d)" % len(self.levels)) )
-                else:
-                    results.append( ('error', base) )
+        if not self.hierarchies:
+            msg = "No hierarchies in dimension '%s'" % (self.name)
+            if self.is_flat:
+                level = self.levels[0]
+                results.append( ('default', msg + ", flat level '%s' will be used" % (level.name)) )
+            elif len(self.levels) > 1:
+                results.append( ('error', msg + ", more than one levels exist (%d)" % len(self.levels)) )
             else:
-                if not self.default_hierarchy_name:
-                    if len(self.hierarchies) > 1 and not "default" in self.hierarchies:
-                        results.append( ('error', "No defaut hierarchy specified, there is "\
-                                                  "more than one hierarchy in dimension '%s'" % self.name) )
-                    else:
-                        def_name = self.default_hierarchy.name
-                        results.append( ('default', "No default hierarchy name specified in dimension '%s', using "
-                                                    "'%s'"% (self.name, def_name)) )
+                results.append( ('error', msg) )
+        else: # if self.hierarchies
+            if not self.default_hierarchy_name:
+                if len(self.hierarchies) > 1 and not "default" in self.hierarchies:
+                    results.append( ('error', "No defaut hierarchy specified, there is "\
+                                              "more than one hierarchy in dimension '%s'" % self.name) )
+                else:
+                    def_name = self.hierarchy().name
+                    results.append( ('default', "No default hierarchy name specified in dimension '%s', using "
+                                                "'%s'"% (self.name, def_name)) )
 
         if self.default_hierarchy_name and not self.hierarchies.get(self.default_hierarchy_name):
-            results.append( ('warning', "Default hierarchy '%s' does not exist in dimension '%s'" % 
+            results.append( ('error', "Default hierarchy '%s' does not exist in dimension '%s'" % 
                             (self.default_hierarchy_name, self.name)) )
 
+        
+        attributes = set()
+        first_occurence = {}
+        
         for level_name, level in self._levels.items():
             if not level.attributes:
                 results.append( ('error', "Level '%s' in dimension '%s' has no attributes" % (level.name, self.name)) )
@@ -1007,15 +1021,36 @@ class Dimension(object):
 
             if level.attributes and level.key:
                 if str(level.key) not in [str(a) for a in level.attributes]:
-                    results.append( ('error', "Key '%s' in level '%s' in dimension '%s' " \
-                                              "is not in attribute list"
-                                                % (level.key, level.name, self.name)) )
+                    results.append( ('error', 
+                                     "Key '%s' in level '%s' in dimension "
+                                     "'%s' is not in level's attribute list" \
+                                     % (level.key, level.name, self.name)) )
 
             for attribute in level.attributes:
+                attr_name = attribute.full_name()
+                if attr_name in attributes:
+                    first = first_occurence[attr_name]
+                    results.append( ('error', 
+                                     "Duplicate attribute '%s' in dimension "
+                                     "'%s' level '%s' (also defined in level "
+                                     "'%s')" % (attribute, self.name, 
+                                              level_name, first)) )
+                else:
+                    attributes.add(attr_name)
+                    first_occurence[attr_name] = level_name
+                
                 if not isinstance(attribute, Attribute):
-                    results.append( ('error', "Attribute '%s' in dimension '%s' is not instance of Attribute" % (attribute, self.name)) )
+                    results.append( ('error', 
+                                     "Attribute '%s' in dimension '%s' is "
+                                     "not instance of Attribute" \
+                                     % (attribute, self.name)) )
+                                     
                 if attribute.dimension != self:
-                    results.append( ('error', "Dimension (%s) of attribute '%s' does not match with owning dimension %s" % (attribute.dimension, attribute, self.name)) )
+                    results.append( ('error',
+                                     "Dimension (%s) of attribute '%s' does "
+                                     "not match with owning dimension %s" \
+                                     % (attribute.dimension, attribute, 
+                                     self.name)) )
 
         return results
 
@@ -1180,9 +1215,10 @@ class Hierarchy(object):
         return self._levels.keys().index(str(level))
 
     def rollup(self, path, level = None):
-        """Rolls-up the path to the `level`. If `level` is None then path is rolled-up only
-        one level. If `level` is deeper than last level of `path` the exception is raised. If 
-        `level` is the same as `path` level, nothing happens."""
+        """Rolls-up the path to the `level`. If `level` is None then path is
+        rolled-up only one level. If `level` is deeper than last level of
+        `path` the exception is raised. If `level` is the same as `path`
+        level, nothing happens."""
         
         if level:
             level = self.dimension.level(level)
@@ -1203,8 +1239,9 @@ class Hierarchy(object):
             return path[0:last]
 
     def path_is_base(self, path):
-        """Returns True if path is base path for the hierarchy. Base path is a path where there are
-        no more levels to be added - no drill down possible."""
+        """Returns True if path is base path for the hierarchy. Base path is a
+        path where there are no more levels to be added - no drill down
+        possible."""
         
         return path != None and len(path) == len(self._levels)
 
@@ -1257,15 +1294,16 @@ class Level(object):
 
     * `name`: level name
     * `label`: human readable label 
-    * `key`: key field of the level (customer number for customer level, region
-      code for region level, year-month for month level). key will be used as
-      a grouping field for aggregations. Key should be unique within level.
+    * `key`: key field of the level (customer number for customer level,
+      region code for region level, year-month for month level). key will be
+      used as a grouping field for aggregations. Key should be unique within
+      level.
     * `label_attribute`: name of attribute containing label to be displayed
       (customer_name for customer level, region_name for region level,
       month_name for month level)
-    * `attributes`: list of other additional attributes that are related to the
-      level. The attributes are not being used for aggregations, they provide
-      additional useful information
+    * `attributes`: list of other additional attributes that are related to
+      the level. The attributes are not being used for aggregations, they
+      provide additional useful information
     """
 
     def __init__(self, name=None, key=None, attributes=None, null_value=None, 
@@ -1388,8 +1426,8 @@ def attribute_list(attributes, dimension=None, attribute_class=None):
 
 def coalesce_attribute(obj, dimension=None, attribute_class=None):
     """Makes sure that the `obj` is an ``Attribute`` instance. If `obj` is a
-    string, then new instance is returned. If it is a dictionary, then
-    the dictionary values are used for ``Attribute``instance initialization."""
+    string, then new instance is returned. If it is a dictionary, then the
+    dictionary values are used for ``Attribute``instance initialization."""
 
     attribute_class = attribute_class or Attribute
 
@@ -1509,9 +1547,9 @@ class Attribute(object):
         return reference + locale_suffix
 
     def full_name(self, dimension=None, locale=None):
-        """Return full name of an attribute as if it was part of `dimension`. Append `locale` if
-        it is one of of attribute's locales, otherwise raise an error.
-        """
+        """Return full name of an attribute as if it was part of `dimension`.
+        Append `locale` if it is one of of attribute's locales, otherwise
+        raise an error. """
         # Old behaviour: If no locale is specified and attribute is localized, then first locale from
         # list of locales is used.
 
@@ -1545,9 +1583,9 @@ def localize_common(obj, trans):
 
 
 def localize_attributes(attribs, translations):
-    """Localize list of attributes. `translations` should be a dictionary with keys as
-    attribute names, values are dictionaries with localizable attribute metadata, such as
-    ``label`` or ``description``."""
+    """Localize list of attributes. `translations` should be a dictionary with
+    keys as attribute names, values are dictionaries with localizable
+    attribute metadata, such as ``label`` or ``description``."""
     for (name, atrans) in translations.items():
         attrib = attribs[name]
         localize_common(attrib, atrans)
