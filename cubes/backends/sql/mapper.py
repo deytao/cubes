@@ -3,6 +3,7 @@
 
 import collections
 from cubes.common import get_logger
+from cubes.errors import *
 
 __all__ = (
     "Mapper",
@@ -24,7 +25,7 @@ DEFAULT_KEY_FIELD = "id"
 """Physical reference to a table column. Note that the table might be an
 aliased table name as specified in relevant join."""
 PhysicalReference = collections.namedtuple("PhysicalReference",
-                                    ["schema", "table", "column"])
+                                    ["schema", "table", "column", "extract"])
 
 """Table join specification. `master` and `detail` are PhysicalReference
 (3-item) tuples"""
@@ -40,8 +41,8 @@ def coalesce_physical(ref, default_table=None, schema=None):
     * a dictionary with keys: ``schema``, ``table``, ``column`` where
       ``column`` is required, the rest are optional
 
-    Returns tuple (`schema`, `table`, `column`), which is a named tuple
-    `PhysicalReference`.
+    Returns tuple (`schema`, `table`, `column`, `extract`), which is a named
+    tuple `PhysicalReference`.
 
     If no table is specified in reference and `default_table` is not
     ``None``, then `default_table` will be used.
@@ -58,21 +59,22 @@ def coalesce_physical(ref, default_table=None, schema=None):
         if len(split) > 1:
             dim_name = split[0]
             attr_name = ".".join(split[1:])
-            return PhysicalReference(schema, dim_name, attr_name)
+            return PhysicalReference(schema, dim_name, attr_name, None)
         else:
-            return PhysicalReference(schema, default_table, ref)
+            return PhysicalReference(schema, default_table, ref, None)
     elif isinstance(ref, dict):
-        return PhysicalReference(ref.get("schema") or schema,
-                                 ref.get("table") or default_table,
-                                 ref.get("column"))
+        return PhysicalReference(ref.get("schema", schema),
+                                 ref.get("table", default_table),
+                                 ref.get("column"),
+                                 ref.get("extract"))
     else:
         if len(ref) == 2:
-            return PhysicalReference(schema, ref[0], ref[1])
+            return PhysicalReference(schema, ref[0], ref[1], None)
         elif len(ref) == 3:
-            return PhysicalReference(ref[0], ref[1], ref[2])
+            return PhysicalReference(ref[0], ref[1], ref[2], None)
         else:
-            raise Exception("Number of items in table reference should "\
-                            "be 2 (table, column) or 3 (schema, table, column)")
+            raise BackendError("Number of items in table reference should "\
+                               "be 2 (table, column) or 3 (schema, table, column)")
 
 
 class Mapper(object):
@@ -153,7 +155,7 @@ class Mapper(object):
 
         return self.attributes[name]
 
-    def logical(self, attribute, locale=False):
+    def logical(self, attribute, locale=None):
         """Returns logical reference as string for `attribute` in `dimension`.
         If `dimension` is ``Null`` then fact table is assumed. The logical
         reference might have following forms:
@@ -172,17 +174,13 @@ class Mapper(object):
         dimension = attribute.dimension
 
         if dimension:
-            if self.simplify_dimension_references and \
-                               (dimension.is_flat and not dimension.has_details):
-                reference = dimension.name
-            else:
-                reference = dimension.name + '.' + str(attribute)
+            simplify = self.simplify_dimension_references and \
+                               (dimension.is_flat and not dimension.has_details)
         else:
-            reference = str(attribute)
-        
-        if locale:
-            reference += "." + locale
+            simplify = False
             
+        reference = attribute.ref(simplify, locale)
+        
         return reference
 
     def split_logical(self, reference):
@@ -363,22 +361,15 @@ class SnowflakeMapper(Mapper):
 
         locale = locale or self.locale
 
-        try:
-            if attribute.locales:
-                locale = locale if locale in attribute.locales \
-                                    else attribute.locales[0]
-            else:
-                locale = None
-        except:
+        if attribute.locales:
+            locale = locale if locale in attribute.locales \
+                                else attribute.locales[0]
+        else:
             locale = None
 
         # Try to get mapping if exists
         if self.cube.mappings:
-            logical = self.logical(attribute)
-            # Append locale to the logical reference
-
-            if locale:
-                logical += "." + locale
+            logical = self.logical(attribute, locale)
 
             # TODO: should default to non-localized reference if no mapping 
             # was found?
@@ -390,7 +381,7 @@ class SnowflakeMapper(Mapper):
         # No mappings exist or no mapping was found - we are going to create
         # default physical reference
         if not reference:
-            column_name = str(attribute)
+            column_name = attribute.name
 
             if locale:
                 column_name += "_" + locale
@@ -405,7 +396,7 @@ class SnowflakeMapper(Mapper):
             else:
                 table_name = self.fact_name
 
-            reference = PhysicalReference(self.schema, table_name, column_name)
+            reference = PhysicalReference(self.schema, table_name, column_name, None)
 
         return reference
 
@@ -428,7 +419,7 @@ class SnowflakeMapper(Mapper):
 
         for join in self.joins:
             if not join.detail.table or join.detail.table == self.fact_name:
-                raise ValueError("Detail table name should be present and should not be a fact table.")
+                raise BackendError("Detail table name should be present and should not be a fact table.")
 
             ref = (join.master.schema, join.master.table)
             tables[ref] = ref
@@ -502,9 +493,8 @@ class DenormalizedMapper(Mapper):
         * `denormalized_view_prefix` – default prefix used for constructing
            view name from cube name
         * `fact_name` – fact name, if not specified then `cube.name` is used
-        * `schema` – database schema for the original fact table
-        * `denormalized_view_schema` – schema where the denormalized view is
-          stored
+        * `schema` – schema where the denormalized view is stored
+        * `fact_schema` – database schema for the original fact table
         """
 
         super(DenormalizedMapper, self).__init__(cube, locale=locale, 
@@ -515,7 +505,8 @@ class DenormalizedMapper(Mapper):
         # FIXME: this hides original fact name, we do not want that
         
         self.fact_name = options.get("denormalized_view") or dview_prefix + self.cube.name
-        self.denormalized_view_schema = denormalized_view_schema or self.schema
+        self.fact_schema = self.schema
+        self.schema = self.schema or denormalized_view_schema
 
     def physical(self, attribute, locale=None):
         """Returns same name as localized logical reference.
@@ -532,9 +523,10 @@ class DenormalizedMapper(Mapper):
             locale = None
             
         column_name = self.logical(attribute, locale)
-        reference = PhysicalReference(self.denormalized_view_schema,
+        reference = PhysicalReference(self.schema,
                                       self.fact_name,
-                                      column_name)
+                                      column_name,
+                                      None)
 
         return reference
 

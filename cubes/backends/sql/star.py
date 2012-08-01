@@ -5,13 +5,29 @@ from cubes.backends.sql.mapper import SnowflakeMapper, DenormalizedMapper
 from cubes.backends.sql.mapper import DEFAULT_KEY_FIELD
 import logging
 import collections
+from cubes.errors import *
 
 try:
     import sqlalchemy
     import sqlalchemy.sql as sql
+
+    aggregation_functions = {
+        "sum": sql.functions.sum,
+        "min": sql.functions.min,
+        "max": sql.functions.max,
+        "count": sql.functions.count
+    }
+
 except ImportError:
     from cubes.common import MissingPackage
-    sqlalchemy = MissingPackage("sqlalchemy", "Built-in SQL aggregation browser")
+    sqlalchemy = sql = MissingPackage("sqlalchemy", "SQL aggregation browser")
+    aggregation_functions = {}
+
+__all__ = [
+    "StarBrowser",
+    "coalesce_drilldown",
+    "create_workspace"
+]
 
 # Required functionality checklist
 # 
@@ -31,8 +47,6 @@ except ImportError:
 # * [partial] dimension values
 # *     [done] pagination
 # *     [done] ordering
-
-__all__ = ["StarBrowser"]
 
 # Browsing context:
 #     * engine
@@ -71,7 +85,7 @@ class StarBrowser(AggregationBrowser):
         super(StarBrowser, self).__init__(cube)
 
         if cube == None:
-            raise Exception("Cube for browser should not be None.")
+            raise ArgumentError("Cube for browser should not be None.")
 
         self.logger = get_logger()
 
@@ -88,13 +102,14 @@ class StarBrowser(AggregationBrowser):
         # about relevant joins to be able to retrieve certain attributes.
 
         if options.get("use_denormalization"):
-            self.logger.debug("using denormalized mapper for cube %s (locale %s)" % (cube, locale))
             mapper_class = DenormalizedMapper
         else:
-            self.logger.debug("using snowflake mapper for cube %s (locale %s)" % (cube, locale))
             mapper_class = SnowflakeMapper
-            
+
+        self.logger.debug("using mapper %s for cube '%s' (locale: %s)" % \
+                            (str(mapper_class.__name__), cube.name, locale))
         self.mapper = mapper_class(cube, locale=self.locale, **options)
+        self.logger.debug("mapper schema: %s" % self.mapper.schema)
 
         # QueryContext is creating SQL statements (using SQLAlchemy). It
         # also caches information about tables retrieved from metadata.
@@ -158,7 +173,7 @@ class StarBrowser(AggregationBrowser):
         levels = hierarchy.levels
 
         if depth == 0:
-            raise ValueError("Depth for dimension values should not be 0")
+            raise ArgumentError("Depth for dimension values should not be 0")
         elif depth is not None:
             levels = levels[0:depth]
 
@@ -173,7 +188,8 @@ class StarBrowser(AggregationBrowser):
 
         cond = self.context.condition_for_cell(cell)
         statement = self.context.denormalized_statement(whereclause=cond.condition,
-                                                        attributes=attributes)
+                                                        attributes=attributes,
+                                                        include_fact_key=False)
         statement = paginated_statement(statement, page, page_size)
         statement = ordered_statement(statement, order, context=self.context)
 
@@ -188,7 +204,7 @@ class StarBrowser(AggregationBrowser):
 
         return ResultIterator(result, labels)
 
-    def aggregate(self, cell, measures=None, drilldown=None, attributes=None, 
+    def aggregate(self, cell=None, measures=None, drilldown=None, attributes=None, 
                   page=None, page_size=None, order=None, **options):
         """Return aggregated result.
 
@@ -198,6 +214,9 @@ class StarBrowser(AggregationBrowser):
         * with drill-down: 3 (summary, drilldown, total drill-down record
           count)
         """
+
+        if not cell:
+            cell = Cell(self.cube)
 
         # TODO: add ordering (ORDER BY)
         if options.get("order_by"):
@@ -212,6 +231,7 @@ class StarBrowser(AggregationBrowser):
             measures = [self.cube.measure(measure) for measure in measures]
 
         result = AggregationResult()
+        result.cell = cell
 
         summary_statement = self.context.aggregation_statement(cell=cell,
                                                      measures=measures,
@@ -348,16 +368,9 @@ class StarBrowser(AggregationBrowser):
         return issues
 
 """A Condition representation. `attributes` - list of attributes involved in the conditions,
-`conditions` - SQL conditions, `group_by` - attributes to be grouped by."""
+`conditions` - SQL conditions"""
 Condition = collections.namedtuple("Condition",
-                                    ["attributes", "condition", "group_by"])
-
-aggregation_functions = {
-    "sum": sql.functions.sum,
-    "min": sql.functions.min,
-    "max": sql.functions.max,
-    "count": sql.functions.count
-}
+                                    ["attributes", "condition"])
 
 class QueryContext(object):
 
@@ -482,7 +495,7 @@ class QueryContext(object):
         result = []
         for agg_name in aggregations:
             if not agg_name in aggregation_functions:
-                raise Exception("Unknown aggregation type %s for measure %s" % \
+                raise ArgumentError("Unknown aggregation type %s for measure %s" % \
                                     (agg_name, measure))
 
             func = aggregation_functions[agg_name]
@@ -493,7 +506,7 @@ class QueryContext(object):
         return result
 
     def denormalized_statement(self, whereclause=None, attributes=None,
-                                expand_locales=False):
+                                expand_locales=False, include_fact_key=True):
         """Return a statement (see class description for more information) for
         denormalized view. `whereclause` is same as SQLAlchemy `whereclause`
         for `sqlalchemy.sql.expression.select()`. `attributes` is list of
@@ -509,8 +522,10 @@ class QueryContext(object):
         join_expression = self.join_expression_for_attributes(attributes, expand_locales=expand_locales)
 
         columns = self.columns(attributes, expand_locales=expand_locales)
-        key_column = self.fact_table.c[self.fact_key].label(self.fact_key)
-        columns.insert(0, key_column)
+
+        if include_fact_key:
+            key_column = self.fact_table.c[self.fact_key].label(self.fact_key)
+            columns.insert(0, key_column)
 
         select = sql.expression.select(columns,
                                     whereclause=whereclause,
@@ -548,7 +563,7 @@ class QueryContext(object):
             # self.logger.debug("join detail: %s" % (join.detail, ))
 
             if not join.detail.table or join.detail.table == self.fact_name:
-                raise ValueError("Detail table name should be present and should not be a fact table.")
+                raise MappingError("Detail table name should be present and should not be a fact table.")
 
             master_table = self.table(join.master.schema, join.master.table)
             detail_table = self.table(join.detail.schema, join.detail.table, join.alias)
@@ -556,13 +571,13 @@ class QueryContext(object):
             try:
                 master_column = master_table.c[join.master.column]
             except:
-                raise Exception('Unable to find master key (schema %s) "%s"."%s" ' \
-                                    % join.master)
+                raise MappingError('Unable to find master key (schema %s) "%s"."%s" ' \
+                                    % join.master[0:3])
             try:
                 detail_column = detail_table.c[join.detail.column]
             except:
-                raise Exception('Unable to find detail key (schema %s) "%s"."%s" ' \
-                                    % join.detail)
+                raise MappingError('Unable to find detail key (schema %s) "%s"."%s" ' \
+                                    % join.detail[0:3])
 
             onclause = master_column == detail_column
 
@@ -582,11 +597,10 @@ class QueryContext(object):
         """
 
         if not cell:
-            return Condition([], None, [])
+            return Condition([], None)
 
         attributes = set()
         conditions = []
-        group_by = []
 
         for cut in cell.cuts:
             dim = self.cube.dimension(cut.dimension)
@@ -597,30 +611,30 @@ class QueryContext(object):
 
                 condition = wrapped_cond.condition
                 attributes |= wrapped_cond.attributes
-                group_by += wrapped_cond.group_by
 
             elif isinstance(cut, SetCut):
-                conditions = []
+                set_conds = []
 
                 for path in cut.paths:
                     wrapped_cond = self.condition_for_point(dim, path)
-                    conditions.append(wrapped_cond.condition)
+                    set_conds.append(wrapped_cond.condition)
                     attributes |= wrapped_cond.attributes
-                    group_by += wrapped_cond.group_by
 
-                condition = sql.expression.or_(*conditions)
+                condition = sql.expression.or_(*set_conds)
 
             elif isinstance(cut, RangeCut):
-                raise NotImplementedError("Condition for range cuts is not yet implemented")
+                # FIXME: use hierarchy
+                range_cond = self.range_condition(cut.dimension, None, cut.from_path, cut.to_path)
+                condition = range_cond.condition
+                attributes |= range_cond.attributes
 
             else:
-                raise Exception("Only point and set cuts are supported in SQL browser at the moment")
+                raise ArgumentError("Unknown cut type %s" % type(cut))
 
             conditions.append(condition)
 
         condition = sql.expression.and_(*conditions)
-
-        return Condition(attributes, condition, group_by)
+        return Condition(attributes, condition)
 
     def condition_for_point(self, dim, path, hierarchy=None):
         """Returns a `Condition` tuple (`attributes`, `conditions`,
@@ -628,19 +642,15 @@ class QueryContext(object):
         condition - one equality condition for each path element in form:
         ``level[i].key = path[i]``"""
 
-        # TODO: add support for possible multiple hierarchies
-
         attributes = set()
         conditions = []
-        group_by = []
 
         levels = dim.hierarchy(hierarchy).levels_for_path(path)
 
         if len(path) > len(levels):
-            raise Exception("Path has more items (%d: %s) than there are levels (%d) "
-                            "in dimension %s" % (len(path), path, len(levels), dim.name))
+            raise ArgumentError("Path has more items (%d: %s) than there are levels (%d) "
+                                "in dimension %s" % (len(path), path, len(levels), dim.name))
 
-        level = None
         for level, value in zip(levels, path):
 
             # Prepare condition: dimension.level_key = path_value
@@ -650,13 +660,83 @@ class QueryContext(object):
             # FIXME: join attributes only if details are requested
             # Collect grouping columns
             for attr in level.attributes:
-                column = self.column(attr)
-                group_by.append(column)
                 attributes.add(attr)
 
         condition = sql.expression.and_(*conditions)
 
-        return Condition(attributes,condition,group_by)
+        return Condition(attributes,condition)
+
+    def range_condition(self, dim, hierarchy, from_path, to_path):
+        """Return a condition for range (`from_path`, `to_path`). Return
+        value is a `Condition` tuple."""
+        
+        dim = self.cube.dimension(dim)
+        
+        lower = self.boundary_condition(dim, hierarchy, from_path, 0)
+        upper = self.boundary_condition(dim, hierarchy, to_path, 1)
+
+        if from_path and not to_path:
+            return lower
+        elif not from_path and to_path:
+            return upper
+        else:
+            attributes = lower.attributes | upper.attributes
+            condition = sql.expression.and_(lower.condition, upper.condition)
+            return Condition(attributes, condition)
+
+    def boundary_condition(self, dim, hierarchy, path, bound, first=None):
+        """Return a `Condition` tuple for a boundary condition. If `bound` is
+        1 then path is considered to be upper bound (operators < and <= are
+        used), otherwise path is considered as lower bound (operators > and >=
+        are used )"""
+
+        if first is None:
+            return self.boundary_condition(dim, hierarchy, path, bound, first=True)
+
+        if not path:
+            return Condition(set(), None)
+
+        last = self.boundary_condition(dim, hierarchy, path[:-1], bound, first=False)
+
+        levels = dim.hierarchy(hierarchy).levels_for_path(path)
+
+        if len(path) > len(levels):
+            raise ArgumentError("Path has more items (%d: %s) than there are levels (%d) "
+                                "in dimension %s" % (len(path), path, len(levels), dim.name))
+
+        attributes = set()
+        conditions = []
+
+        for level, value in zip(levels[:-1], path[:-1]):
+            column = self.column(level.key)
+            conditions.append(column == value)
+
+            for attr in level.attributes:
+                attributes.add(attr)
+        
+        # Select required operator according to bound
+        # 0 - lower bound
+        # 1 - upper bound
+        if bound == 1:
+            # 1 - upper bound (that is <= and < operator)
+            operator = sql.operators.le if first else sql.operators.lt
+        else:
+            # else - lower bound (that is >= and > operator)
+            operator = sql.operators.ge if first else sql.operators.gt
+
+        column = self.column(levels[-1].key)
+        conditions.append( operator(column, path[-1]) )
+
+        for attr in levels[-1].attributes:
+            attributes.add(attr)
+
+        condition = sql.expression.and_(*conditions)
+        attributes |= last.attributes 
+
+        if last.condition:
+            condition = sql.expression.or_(condition, last.condition) 
+
+        return Condition(attributes, condition)
 
     def table(self, schema, table_name, alias=None):
         """Return a SQLAlchemy Table instance. If table was already accessed,
@@ -689,8 +769,12 @@ class QueryContext(object):
 
         ref = self.mapper.physical(attribute, locale)
         table = self.table(ref.schema, ref.table)
-
         column = table.c[ref.column]
+
+        # Extract part of the date
+        if ref.extract:
+            column = sql.expression.extract(ref.extract, column)
+
         column = column.label(self.mapper.logical(attribute, locale))
 
         return column
@@ -723,33 +807,23 @@ def coalesce_drilldown(cell, drilldown):
     """
 
     # TODO: consider hierarchies (currently ignored, default is used)
-
     result = {}
-
     depths = cell.level_depths()
 
-    if type(drilldown) == list or type(drilldown) == tuple:
+    # If the drilldown is a list, convert it into a dictionary
+    if not isinstance(drilldown, dict):
+        drilldown = {dim:None for dim in drilldown}
 
-        for dim in drilldown:
-            dim = cell.cube.dimension(dim)
-            depth = depths.get(str(dim)) or 0
+    for dim, level in drilldown.items():
+        dim = cell.cube.dimension(dim)
+
+        if level:
+            hier = dim.default_hierarchy
+            index = hier.level_index(level)
+            result[dim.name] = hier[:index+1]
+        else:
+            depth = depths.get(str(dim), 0)
             result[dim.name] = drilldown_levels(dim, depth+1)
-
-    elif isinstance(drilldown, dict):
-
-        for dim, level in drilldown.items():
-            dim = cell.cube.dimension(dim)
-
-            if level:
-                hier = dim.default_hierarchy
-                index = hier.level_index(level)
-                result[dim.name] = hier[:index+1]
-            else:
-                depth = depths.get(str(dim)) or 0
-                result[dim.name] = drilldown_levels(dim, depth+1)
-
-    elif drilldown is not None:
-        raise TypeError("Drilldown is of unknown type: %s" % type(drilldown))
 
     return result
 
@@ -762,9 +836,9 @@ def drilldown_levels(dimension, depth, hierarchy=None):
     depth = depth or 0
 
     if depth > len(hier):
-        raise ValueError("Hierarchy %s in dimension %s has only %d levels, "
+        raise ArgumentError("Hierarchy %s in dimension %s has only %d levels, "
                          "can not drill to %d" % \
-                         (hier,dimension,len(hier),depth+1))
+                         (hier,dimension,len(hier),depth))
 
     return hier[:depth]
 
@@ -848,7 +922,7 @@ def order_column(column, order):
     elif order.lower().startswith("desc"):
         return column.desc()
     else:
-        raise Exception("Unknown order %s for column %s") % (order, column)
+        raise ArgumentError("Unknown order %s for column %s") % (order, column)
 
 
 class ResultIterator(object):
@@ -909,10 +983,11 @@ def create_workspace(model, **options):
     
     The options are:
     
-    Required:
+    Required (one of the two, `engine` takes precedence):
     
     * `url` - database URL in form of:
       ``backend://user:password@host:port/database``
+    * `engine` - SQLAlchemy engine - either this or URL should be provided
 
     Optional:
     
@@ -922,21 +997,29 @@ def create_workspace(model, **options):
       when no explicit mapping is specified
     * `fact_prefix` - used by the snowflake mapper to find fact table for a
       cube, when no explicit fact table name is specified
+
+     Options for denormalized views:
+     
     * `use_denormalization` - browser will use dernormalized view instead of
       snowflake
     * `denormalized_view_prefix` - if denormalization is used, then this
       prefix is added for cube name to find corresponding cube view
     * `denormalized_view_schema` - schema wehere denormalized views are
-      located (if not specified, then default schema is used)
-    
+      located (use this if the views are in different schema than fact tables,
+      otherwise default schema is going to be used)
     """
+    engine = options.get("engine")
 
-    try:
-        dburl = options["url"]
-    except KeyError:
-        raise Exception("No URL specified in options")
+    if engine:
+        del options["engine"]
+    else:
+        try:
+            db_url = options["url"]
+        except KeyError:
+            raise ArgumentError("No URL or engine specified in options, "
+                                "provide at least one")
+        engine = sqlalchemy.create_engine(db_url)
 
-    engine = sqlalchemy.create_engine(dburl)
 
     workspace = SQLStarWorkspace(model, engine, **options)
 
@@ -980,11 +1063,17 @@ class SQLStarWorkspace(object):
                               **self.options)
         return browser
 
-    def create_denormalized_view(self, cube, view_name, materialize=False, 
+    def create_denormalized_view(self, cube, view_name=None, materialize=False, 
                                  replace=False, create_index=False, 
-                                 keys_only=False):
-        """Creates a denormalized view named `view_name` of a `cube`. Options:
-        
+                                 keys_only=False, schema=None):
+        """Creates a denormalized view named `view_name` of a `cube`. If
+        `view_name` is ``None`` then view name is constructed by pre-pending
+        value of `denormalized_view_prefix` from workspace options to the cube
+        name. If no prefix is specified in the options, then view name will be
+        equal to the cube name.
+
+        Options:
+
         * `materialize` - whether the view is materialized (a table) or
           regular view
         * `replace` - if `True` then existing table/view will be replaced,
@@ -994,7 +1083,11 @@ class SQLStarWorkspace(object):
           attribute. Can be used only on materialized view, otherwise raises
           an exception
         * `keys_only` - if ``True`` then only key attributes are used in the
-          view, all other detail attributes are ignored            
+          view, all other detail attributes are ignored
+        * `schema` - target schema of the denormalized view, if not specified,
+          then `denormalized_view_schema` from options is used if specified,
+          otherwise default workspace schema is used (same schema as fact
+          table schema).
         """
 
         cube = self.model.cube(cube)
@@ -1011,19 +1104,27 @@ class SQLStarWorkspace(object):
         else:
             statement = context.denormalized_statement(expand_locales=True)
 
-        table = sqlalchemy.Table(view_name, self.metadata,
-                                 autoload=False, schema=self.schema)
+        schema = schema or self.options.get("denormalized_view_schema") or self.schema
 
-        full_name = "%s.%s" % (self.schema, view_name) if self.schema else view_name
+        dview_prefix = self.options.get("denormalized_view_prefix","")
+        view_name = view_name or dview_prefix + cube.name
+
+        table = sqlalchemy.Table(view_name, self.metadata,
+                                 autoload=False, schema=schema)
+
+        preparer = self.engine.dialect.preparer(self.engine.dialect)
+        full_name = preparer.format_table(table)
+
+        if mapper.fact_name == view_name and schema == mapper.schema:
+            raise WorkspaceError("target denormalized view is the same as source fact table")
 
         if table.exists():
             if not replace:
-                raise Exception("Table %s (schema: %s) already exists. "
-                                "Use replace=True to force creation" % \
-                                (view_name, self.schema))
+                raise WorkspaceError("View or table %s (schema: %s) already exists." % \
+                                   (view_name, schema))
 
             inspector = sqlalchemy.engine.reflection.Inspector.from_engine(self.engine)
-            view_names = inspector.get_view_names(schema=self.schema)
+            view_names = inspector.get_view_names(schema=schema)
 
             if view_name in view_names:
                 # Table reflects a view
@@ -1046,15 +1147,15 @@ class SQLStarWorkspace(object):
 
         if create_index:
             if not materialize:
-                raise Exception("Index can be created only on materialized view")
+                raise WorkspaceError("Index can be created only on a materialized view")
                 
             # self.metadata.reflect(schema = schema, only = [view_name] )
             table = sqlalchemy.Table(view_name, self.metadata,
-                                     autoload=True, schema=self.schema)
+                                     autoload=True, schema=schema)
             self.engine.reflecttable(table)
 
             for attribute in key_attributes:
-                label = attribute.full_name()
+                label = attribute.ref()
                 self.logger.info("creating index for %s" % label)
                 column = table.c[label]
                 name = "idx_%s_%s" % (view_name, label)

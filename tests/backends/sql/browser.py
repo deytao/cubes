@@ -1,7 +1,6 @@
 import unittest
 import os
 import cubes
-import cubes.tests
 import json
 import re
 import logging
@@ -12,15 +11,13 @@ from sqlalchemy import Table, Column, Integer, Float, String, MetaData, ForeignK
 from sqlalchemy import create_engine
 import sqlalchemy
 
-from common import DATA_PATH
+from ...common import DATA_PATH
 
 FACT_COUNT = 100
 
 class SQLTestCase(unittest.TestCase):
 	
     def setUp(self):
-        self.model = cubes.Model('test')
-        
         date_desc = { "name": "date", 
                       "levels": { 
                                     "year": { 
@@ -58,14 +55,19 @@ class SQLTestCase(unittest.TestCase):
                                 } 
                         }
                     }
+                    
+        cube = {
+            "name": "testcube",
+        }
+        
+        self.date_dim = cubes.create_dimension(date_desc)
+        self.class_dim = cubes.create_dimension(class_desc)
+        dims = [self.date_dim, self.class_dim]
 
-        self.cube = cubes.Cube("testcube")
+        self.model = cubes.Model('test', dimensions=dims)
+        self.cube = cubes.Cube("testcube", dimensions=dims)
+
         self.model.add_cube(self.cube)
-
-        self.date_dim = cubes.Dimension(**date_desc)
-        self.cube.add_dimension(self.date_dim)
-        self.class_dim = cubes.Dimension(**class_desc)
-        self.cube.add_dimension(self.class_dim)
         
         self.cube.measures = [cubes.Attribute("amount")]
         self.cube.mappings = {
@@ -129,14 +131,14 @@ class SQLBrowserTestCase(SQLTestCase):
         self.full_cube = self.browser.full_cube()
 
     def test_fact_query(self):
-        
+
         query = CubeQuery(self.full_cube, self.view)
         query.prepare()
         stmt = query.fact_statement(1)
         s = str(stmt)
         self.assertRegexpMatches(s, 'view\.id =')
 
-        cell = self.full_cube.slice(self.date_dim, [2010])
+        cell = self.full_cube.slice(cubes.PointCut(self.date_dim, [2010]))
         query = CubeQuery(cell, self.view)
         query.prepare()
         stmt = query.fact_statement(1)
@@ -154,7 +156,7 @@ class SQLBrowserTestCase(SQLTestCase):
 
     def test_fact_with_conditions(self):
 
-        cell = self.full_cube.slice(self.date_dim, [2010])
+        cell = self.full_cube.slice(cubes.PointCut(self.date_dim, [2010]))
 
         query = CubeQuery(cell, self.view)
         query.prepare()
@@ -165,7 +167,7 @@ class SQLBrowserTestCase(SQLTestCase):
         self.assertNotRegexpMatches(s, 'view\."date\.month" =')
         self.assertNotRegexpMatches(s, 'view\."class\.[^=]*"=')
 
-        cell = self.full_cube.slice(self.date_dim, [2010, 4])
+        cell = self.full_cube.slice(cubes.PointCut(self.date_dim, [2010, 4]))
         query = CubeQuery(cell, self.view)
         query.prepare()
         stmt = query.facts_statement
@@ -184,7 +186,7 @@ class SQLBrowserTestCase(SQLTestCase):
         self.execute(stmt)
 
     def test_aggregate_point(self):
-        cell = self.full_cube.slice(self.date_dim, [2010])
+        cell = self.full_cube.slice(cubes.PointCut(self.date_dim, [2010]))
 
         query = CubeQuery(cell, self.view)
         query.prepare()
@@ -201,7 +203,7 @@ class SQLBrowserTestCase(SQLTestCase):
         self.assertNotRegexpMatches(s, r'cls')
         self.execute(stmt)
         
-        cell = self.full_cube.slice(self.date_dim, [2010, 4])
+        cell = self.full_cube.slice(cubes.PointCut(self.date_dim, [2010, 4]))
 
         query = CubeQuery(cell, self.view)
         query.prepare()
@@ -215,7 +217,7 @@ class SQLBrowserTestCase(SQLTestCase):
         self.assertNotRegexpMatches(s, r'cls')
         self.execute(stmt)
         
-        cell = self.full_cube.slice(self.class_dim, [1])
+        cell = self.full_cube.slice(cubes.PointCut(self.class_dim, [1]))
 
         query = CubeQuery(cell, self.view)
         query.prepare()
@@ -239,7 +241,7 @@ class SQLBrowserTestCase(SQLTestCase):
         self.assertRegexpMatches(s, r'date\.year')
         self.assertNotRegexpMatches(s, r'date\.month')
 
-        cell = self.full_cube.slice(self.date_dim, [2010])
+        cell = self.full_cube.slice(cubes.PointCut(self.date_dim, [2010]))
         query = CubeQuery(cell, self.view)
         query.drilldown = ["date"]
         query.prepare()
@@ -248,7 +250,7 @@ class SQLBrowserTestCase(SQLTestCase):
         self.assertRegexpMatches(s, r'date\.year')
         self.assertRegexpMatches(s, r'date\.month')
 
-        cell = self.full_cube.slice(self.date_dim, [2010, 4])
+        cell = self.full_cube.slice(cubes.PointCut(self.date_dim, [2010, 4]))
         query = CubeQuery(cell, self.view)
         query.drilldown = ["date"]
         self.assertRaisesRegexp(ValueError, "Unable to drill-down.*last level", query.prepare)
@@ -281,7 +283,7 @@ class SQLBrowserTestCase(SQLTestCase):
         self.assertRegexpMatches(s, r'date\.year')
         self.assertNotRegexpMatches(s, r'date\.month')
 
-        cell = cell.slice("date", [2010])
+        cell = cell.slice(cubes.PointCut("date", [2010]))
         query = CubeQuery(cell, self.view)
         query.drilldown = {"date": "month"}
         query.prepare()
@@ -294,6 +296,7 @@ class SQLBrowserTestCase(SQLTestCase):
     def execute(self, stmt):
         self.connection.execute(stmt)
         
+
 class SQLDenormalizerTestCase(unittest.TestCase):
     def setUp(self):
 
@@ -314,7 +317,7 @@ class SQLDenormalizerTestCase(unittest.TestCase):
         a_file.close()
 
         self.dimension_names = [name for name in self.dimensions.keys()]
-        
+
         self.create_dimension_tables()
         self.create_fact()
 
@@ -322,7 +325,7 @@ class SQLDenormalizerTestCase(unittest.TestCase):
         model_path = os.path.join(DATA_PATH, 'fixtures_model.json')
         self.model = cubes.load_model(model_path)
         self.cube = self.model.cube("test")
-        
+
     def create_dimension_tables(self):
         for dim, desc in self.dimensions.items():
             self.create_dimension(dim, desc, self.dimension_data[dim])
@@ -423,6 +426,7 @@ class SQLDenormalizerTestCase(unittest.TestCase):
         result = browser.aggregate(cell)
         self.assertEqual(FACT_COUNT, result.summary["record_count"])
     
+
 class SQLQueryTestCase(unittest.TestCase):
     def setUp(self):
         engine = create_engine('sqlite://')
@@ -448,10 +452,11 @@ class SQLQueryTestCase(unittest.TestCase):
         self.cube = cubes.Cube("test")
         self.model.add_cube(self.cube)
 
-        dimension = cubes.Dimension("color", levels=["color", "tone"])
+        desc = {"name": "color", "levels":["color", "tone"]}
+        dimension = cubes.create_dimension(desc)
         self.cube.add_dimension(dimension)
 
-        dimension = cubes.Dimension("size")
+        dimension = cubes.create_dimension("size")
         self.cube.add_dimension(dimension)
 
     def test_query_column(self):

@@ -23,8 +23,7 @@ import copy
 logger = logging.getLogger("cubes")
 logger.setLevel(logging.WARN)
 
-FACT_TABLE = "ft_irbd_balance"
-FACT_VIEW = "vft_irbd_balance"
+FACT_TABLE = "irbd_balance"
 
 engine = sqlalchemy.create_engine('sqlite:///:memory:')
 tutorial.create_table_from_csv(engine, 
@@ -39,23 +38,10 @@ tutorial.create_table_from_csv(engine,
                             ("year", "integer"), 
                             ("amount", "integer")],
                       create_id=True    
-                        
-                        )
-
-model = cubes.load_model("models/model_03.json")
-
-cube = model.cube("irbd_balance")
-cube.fact = FACT_TABLE
-
-# 4. Create a browser and get a cell representing the whole cube (all data)
-
-connection = engine.connect()
-dn = cubes.backends.sql.SQLDenormalizer(cube, connection)
-
-dn.create_view(FACT_VIEW)
+                    )
 
 def drill_down(cell, dimension, path = []):
-    """Drill-down and aggregate recursively through als levels of `dimension`.
+    """Drill-down and aggregate recursively through all levels of `dimension`.
     
     This function is like recursively traversing directories on a file system and aggregating the
     file sizes, for example.
@@ -71,7 +57,7 @@ def drill_down(cell, dimension, path = []):
     # Get dimension's default hierarchy. Cubes supports multiple hierarchies, for example for
     # date you might have year-month-day or year-quarter-month-day. Most dimensions will
     # have one hierarchy, thought.
-    hierarchy = dimension.default_hierarchy
+    hierarchy = dimension.hierarchy()
 
     # Can we go deeper in the hierarchy? Base path is path to the most detailed element,
     # to the leaf of a tree, to the fact.
@@ -113,13 +99,20 @@ def drill_down(cell, dimension, path = []):
         drill_path = path[:] + [record[level_key]]
 
         # Get a new cell slice for current path
-        drill_down_cell = cell.slice(dimension, drill_path)
+        drill_down_cell = cell.slice(cubes.PointCut(dimension, drill_path))
 
         # And do recursive drill-down
         drill_down(drill_down_cell, dimension, drill_path)
 
-# Drill down through all levels of item hierarchy
-browser = cubes.backends.sql.SQLBrowser(cube, connection, view_name = FACT_VIEW)
+# 2. Load model and get cube of our interest
+
+model = cubes.load_model("models/model_03.json")
+cube = model.cube("irbd_balance")
+
+# 3. Create a browser
+
+workspace = cubes.create_workspace("sql.star", model, engine=engine)
+browser = workspace.browser(cube)
 
 # Get whole cube
 cell = browser.full_cube()
@@ -128,6 +121,5 @@ print "Drill down through all item levels:"
 drill_down(cell, cube.dimension("item"))
 
 print "Drill down through all item for year 2010:"
-cell = cell.slice("year", [2010])
+cell = cell.slice(cubes.PointCut("year", [2010]))
 drill_down(cell, cube.dimension("item"))
-

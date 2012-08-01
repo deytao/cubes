@@ -17,14 +17,28 @@ TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'templates')
 
 API_VERSION = "1"
 
+def str_to_bool(string):
+    """Convert a `string` to bool value. Returns ``True`` if `string` is
+    one of ``["true", "yes", "1", "on"]``, returns ``False`` if `string` is
+    one of  ``["false", "no", "0", "off"]``, otherwise returns ``None``."""
+
+    if string is not None:
+        if string.lower() in ["true", "yes", "1", "on"]:
+            return True
+        elif string.lower() in["false", "no", "0", "off"]:
+            return False
+
+    return None
+
 class ServerError(HTTPException):
     code = 500
     error_type = "default"
-    def __init__(self, message = None, exception = None):
+    def __init__(self, message=None, exception=None, **details):
         super(ServerError, self).__init__()
         self.message = message
         self.exception = exception
-        self.details = {}
+        self.details = details
+        self.help = None
 
     def get_body(self, environ):
         error = {
@@ -38,7 +52,7 @@ class ServerError(HTTPException):
         if self.details:
             error.update(self.details)
         
-        string = json.dumps({"error": error},indent = 4)
+        string = json.dumps({"error": error}, indent=4)
         return string
 
     def get_headers(self, environ):
@@ -52,16 +66,18 @@ class RequestError(ServerError):
 class NotFoundError(ServerError):
     code = 404
     error_type = "not_found"
-    def __init__(self, obj, objtype = None, message = None):
+    def __init__(self, obj, objtype=None, message=None):
         super(NotFoundError, self).__init__(message)
-        self.details = {
-            "object": obj,
-        }
+        self.details = { "object": obj }
+
+        if objtype:
+            self.details["object_type"] = objtype
+            
         if not message:
             self.message = "Object '%s' of type '%s' was not found" % (obj, objtype)
-        if type:
-            self.details["object_type"] = objtype
-
+        else:
+            self.message = message
+            
 class AggregationError(ServerError):
     code = 400
 

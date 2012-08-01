@@ -2,10 +2,16 @@ import logging
 import json
 import decimal
 import copy
+import re
+from collections import namedtuple
+
 try:
     from collections import OrderedDict
 except ImportError:
     from ordereddict import OrderedDict
+
+from cubes.errors import *
+from .model import Dimension, Cube
 
 __all__ = [
     "AggregationBrowser",
@@ -18,7 +24,12 @@ __all__ = [
     "cuts_from_string",
     "string_from_cuts",
     "string_from_path",
-    "path_from_string"
+    "path_from_string",
+    "cut_from_string",
+    "cut_from_dict",
+    "DrilldownRow",
+    "CrossTable",
+    "cross_table"
 ]
 
 class AggregationBrowser(object):
@@ -29,11 +40,14 @@ class AggregationBrowser(object):
 
     """
 
+    features = []
+    """List of browser features as strings."""
+
     def __init__(self, cube):
         super(AggregationBrowser, self).__init__()
 
         if not cube:
-            raise AttributeError("No cube given for aggregation browser")
+            raise ArgumentError("No cube given for aggregation browser")
 
         self.cube = cube
 
@@ -53,13 +67,14 @@ class AggregationBrowser(object):
         * `dimension` - a dimension object or a string, if it is a string,
           then dimension object is retrieved from cube
         """
+        # FIXME: depreciate, use cube.dimension(...) directly
 
         if type(dimension) == str:
             return self.cube.dimension(dimension)
         else:
             return dimension
 
-    def aggregate(self, cell, measures = None, drilldown = None, **options):
+    def aggregate(self, cell=None, measures=None, drilldown=None, **options):
         """Return aggregate of a cell.
 
         Subclasses of aggregation browser should implement this method.
@@ -70,45 +85,28 @@ class AggregationBrowser(object):
           default `None`
         * `measures` - list of measures to be aggregated. By default all
           measures are aggregated.
-            
+
         Drill down can be specified in two ways: as a list of dimensions or as
         a dictionary. If it is specified as list of dimensions, then cell is
         going to be drilled down on the next level of specified dimension. Say
         you have a cell for year 2010 and you want to drill down by months,
         then you specify ``drilldown = ["date"]``.
-        
+
         If `drilldown` is a dictionary, then key is dimension or dimension
         name and value is last level to be drilled-down by. If the cell is at
         `year` level and drill down is: ``{ "date": "day" }`` then both
         `month` and `day` levels are added.
-        
+
         If there are no more levels to be drilled down, an exception is
         raised. Say your model has three levels of the `date` dimension:
-        `year`, `month`, `day` and you try to drill down by `date` then
-        ``ValueError`` will be raised.
-        
+        `year`, `month`, `day` and you try to drill down by `date` at the next
+        level then ``ValueError`` will be raised.
+
         Retruns a :class:AggregationResult object.
         """
         raise NotImplementedError
-        
-    # def crosstab(self, cell, measures, drilldown, rows = None, columns = None, **options):
-    #     """Aggregate facts and return cross-table. Calls `aggregate()` to get results then
-    #     transforms the `AggregationResult` into a cross-tab.
-    # 
-    #     :Parameters:
-    #         * cell - cell to be aggregated
-    #         * rows - list of dimensions to be put on rows
-    #         * columns - list of dimensions to be put on columns
-    #     """
-    #     raise NotImplementedError("cross tab is under development, body of this function should be considered as development notes")
-    #     
-    #     drilldown = []
-    # 
-    #     if rows:
-    #         for dim in rows:
-    #             dim = self.cube.dimension(dim)
 
-    def facts(self, cell, **options):
+    def facts(self, cell=None, **options):
         """Return an iterable object with of all facts within cell"""
         
         raise NotImplementedError
@@ -128,20 +126,21 @@ class AggregationBrowser(object):
         """
         raise NotImplementedError
         
-    def report(self, cell, report):
-        """Bundle multiple requests from `report` into a single one.
+    def report(self, cell, queries):
+        """Bundle multiple requests from `queries` into a single one.
         
-        Keys of `report` are custom names of queries which caller can later
+        Keys of `queries` are custom names of queries which caller can later
         use to retrieve respective query result. Values are dictionaries
         specifying arguments of the particular query. Each query should
         contain at least one required value ``query`` which contains name of
         the query function: ``aggregate``, ``facts``, ``fact``, ``values`` and
-        cell ``details``. Rest of values are function specific, please refer
-        to the respective function documentation for more information.
+        cell ``cell`` (for cell details). Rest of values are function
+        specific, please refer to the respective function documentation for
+        more information.
                 
         Example::
         
-            report = {
+            queries = {
                 "product_summary" = { "query": "aggregate", 
                                       "drilldown": "product" }
                 "year_list" = { "query": "values", 
@@ -153,7 +152,7 @@ class AggregationBrowser(object):
         report specification and values will be result values from each query
         call.::
         
-            result = browser.report(cell, report)
+            result = browser.report(cell, queries)
             product_summary = result["product_summary"]
             year_list = result["year_list"]
 
@@ -161,6 +160,9 @@ class AggregationBrowser(object):
         at once, for example you might want to have always on a page: total
         transaction count, total transaction amount, drill-down by year and
         drill-down by transaction type.
+
+        Raises `cubes.ArgumentError` when there are no queries specified
+        or if a query is of unknown type.
 
         *Roll-up*
         
@@ -203,51 +205,63 @@ class AggregationBrowser(object):
         
         report_result = {}
         
-        for result_name, report_query in report.items():
-            query = report_query.get("query")
-            if not query:
-                raise KeyError("No report query for '%s'" % result_name)
-                
-            args = dict(report_query)
+        for result_name, query in queries.items():
+            query_type = query.get("query")
+            if not query_type:
+                raise ArgumentError("No report query for '%s'" % result_name)
+            
+            # FIXME: add: cell = query.get("cell")
+            
+            args = dict(query)
             del args["query"]
             
             # Note: we do not just convert name into function from symbol for possible future
             # more fine-tuning of queries as strings
 
             # Handle rollup
-            rollup = report_query.get("rollup")
+            rollup = query.get("rollup")
             if rollup:
                 query_cell = cell.rollup(rollup)
             else:
                 query_cell = cell
 
-            if query == "aggregate":
+            if query_type == "aggregate":
                 result = self.aggregate(query_cell, **args)
 
-            elif query == "facts":
+            elif query_type == "facts":
                 result = self.facts(query_cell, **args)
 
-            elif query == "fact":
+            elif query_type == "fact":
                 # Be more tolerant: by default we want "key", but "id" might be common
                 key = args.get("key")
                 if not key:
                     key = args.get("id")
                 result = self.fact(key)
 
-            elif query == "values":
+            elif query_type == "values":
                 result = self.values(query_cell, **args)
-
-            elif query == "details":
+            
+            elif query_type == "details":
+                # FIXME: depreciate this raw form
                 result = self.cell_details(query_cell, **args)
 
+            elif query_type == "cell":
+                details = self.cell_details(query_cell, **args)
+                cell_dict = query_cell.to_dict()
+
+                for cut, detail in zip(cell_dict["cuts"], details):
+                    cut["details"] = detail
+
+                result = cell_dict
+
             else:
-                raise KeyError("Unknown report query '%s' for '%s'" % (query, result_name))
+                raise ArgumentError("Unknown report query '%s' for '%s'" % (query_type, result_name))
 
             report_result[result_name] = result
             
         return report_result
 
-    def cell_details(self, cell, dimension=None):
+    def cell_details(self, cell=None, dimension=None):
         """Returns details for the `cell`. Returned object is a list with one
         element for each cell cut. If `dimension` is specified, then details
         only for cuts that use the dimension are returned.
@@ -268,6 +282,8 @@ class AggregationBrowser(object):
         # TODO: is the name right?
         # TODO: dictionary or class representation?
         # TODO: how we can add the cell as well?
+        if not cell:
+            return []
 
         if dimension:
             cuts = [cut for cut in cell.cuts if str(cut.dimension)==str(dimension)]
@@ -340,23 +356,77 @@ class AggregationBrowser(object):
 
         details = dim_values[0]
         
-        result = []
-        for level in hierarchy.levels_for_path(path):
-            item = {a.full_name():details.get(a.full_name()) for a in level.attributes}
-            item["_key"] = details.get(level.key.full_name())
-            item["_label"] = details.get(level.label_attribute.full_name())
-            result.append(item)
+        if (dimension.is_flat and not dimension.has_details):
+            name = dimension.all_attributes()[0].name
+            value = details.get(name)
+            item = { name: value }
+            item["_key"] = value
+            item["_label"] = value
+            result = [item]
+        else:
+            result = []
+            for level in hierarchy.levels_for_path(path):
+                item = {a.ref():details.get(a.ref()) for a in level.attributes}
+                item["_key"] = details.get(level.key.ref())
+                item["_label"] = details.get(level.label_attribute.ref())
+                result.append(item)
         
         return result
                
 class Cell(object):
     """Part of a cube determined by slicing dimensions. Immutable object."""
     def __init__(self, cube=None, cuts=[]):
+        if not isinstance(cube, Cube):
+            raise ArgumentError("Cell cube should be sublcass of Cube, "
+                                          "provided: %s" % type(cube).__name__)
         self.cube = cube
         self.cuts = cuts
 
-    def slice(self, dimension, path):
-        """Create another cell by slicing receiving cell through `dimension`
+    def to_dict(self):
+        """Returns a dictionary representation of the cell"""
+        result = {
+            "cube": str(self.cube.name),
+            "cuts": [cut.to_dict() for cut in self.cuts]
+        }
+        
+        return result;
+
+    def slice(self, cut, dummy=None):
+        """Returns new cell by slicing receiving cell with `cut`. Cut with
+        same dimension as `cut` will be replaced, if there is no cut with the
+        same dimension, then the `cut` will be appended.
+        """
+        
+        # Fix for wrong early design decision:
+        if isinstance(cut, Dimension) or isinstance(cut, basestring):
+            raise CubesError("slice() should now be called with a cut (since v0.9.2). To get "
+                             "original behaviour of one-dimension point cut, "
+                             "use point_slice(dim, path) instead or better: "
+                             "use cell.slice(PointCut(dim,path))")
+
+        cuts = self.cuts[:]
+        index = self._find_dimension_cut(cut.dimension)
+        if index is not None:
+            cuts[index] = cut
+        else:
+            cuts.append(cut)
+
+        return Cell(cube=self.cube, cuts=cuts)
+
+    def _find_dimension_cut(self, dimension):
+        """Returns index of first occurence of cut for `dimension`. Returns
+        ``None`` if no cut with `dimension` is found."""
+        names = [str(cut.dimension) for cut in self.cuts]
+
+        try:
+            index = names.index(str(dimension))
+            return index
+        except ValueError:
+            return None
+        
+    def point_slice(self, dimension, path):
+        """
+        Create another cell by slicing receiving cell through `dimension`
         at `path`. Receiving object is not modified. If cut with dimension
         exists it is replaced with new one. If path is empty list or is none,
         then cut for given dimension is removed.
@@ -364,10 +434,17 @@ class Cell(object):
         Example::
 
             full_cube = Cell(cube)
-            contracts_2010 = full_cube.slice("date", [2010])
+            contracts_2010 = full_cube.point_slice("date", [2010])
 
         Returns: new derived cell object.
+        
+        .. warning::
+        
+            Depreiated. Use :meth:`cell.slice` instead with argument
+            `PointCut(dimension, path)`
+        
         """
+        
         dimension = self.cube.dimension(dimension)
         cuts = self._filter_dimension_cuts(dimension, exclude=True)
         if path:
@@ -416,25 +493,15 @@ class Cell(object):
             
 
     def multi_slice(self, cuts):
-        """Create another cell by slicing through multiple slices. `cuts` can
-        be list or a dictionry. If it is a list, it should be a list of two
-        item tuples where first item is a dimension, second item is a
-        dimension cut path. If `cuts` is a dictionary, then keys are
-        dimensions, values are cut paths.
+        """Create another cell by slicing through multiple slices. `cuts` is a
+        list of `Cut` object instances. See also :meth:`Cell.slice`."""
 
-        See :meth:`Cell.slice` for more information about slicing."""
+        if isinstance(cuts, dict):
+            raise CubesError("dict type is not supported any more, use list of Cut instances")
 
         cell = self
-
-        if type(cuts) == dict:
-            for dim, path in cuts.items():
-                cell = cell.slice(dim, path)
-        elif type(cuts) == list or type(cuts) == tuple:
-            for dim, path in cuts:
-                cell = cell.slice(dim, path)
-        else:
-            raise TypeError("Cuts for multi_slice sohuld be a list or a dictionary, is '%s'" \
-                                % cuts.__class__)
+        for cut in cuts:
+            cell = cell.slice(cut)
 
         return cell
 
@@ -548,7 +615,7 @@ class Cell(object):
             for (dim_name, level_name) in rollup.items():
                 cut = cuts[dim_name]
                 if not cut:
-                    raise ValueError("No cut to roll-up for dimension '%s'" % dim_name)
+                    raise ArgumentError("No cut to roll-up for dimension '%s'" % dim_name)
                 if type(cut) != PointCut:
                     raise NotImplementedError("Only PointCuts are currently supported for "
                                               "roll-up (rollup dimension: %s)" % dim_name)
@@ -561,7 +628,7 @@ class Cell(object):
                 cut = PointCut(cut.dimension, rollup_path)
                 new_cuts.append(cut)
         else:
-            raise TypeError("Rollup is of unknown type: %s" % self.drilldown.__class__)
+            raise ArgumentError("Rollup is of unknown type: %s" % self.drilldown.__class__)
         
         cell = Cell(cube=self.cube, cuts=new_cuts)
         return cell
@@ -582,6 +649,26 @@ class Cell(object):
             levels[dim_name] = max(level, levels.get(dim_name))
 
         return levels
+    
+    def is_base(self, dimension, hierarchy=None):
+        """Returns ``True`` when cell is base cell for `dimension`. Cell
+        is base if there is a point cut with path referring to the
+        most detailed level of the dimension `hierarchy`."""
+
+        
+        hierarchy = dimension.hierarchy(hierarchy)
+        
+        dim_cut = None
+        for cut in self.cuts:
+            if isinstance(cut, PointCut) and cut.dimension == dimension:
+                dim_cut = cut
+                break
+        
+        depth = dim_cut.level_depth() if dim_cut else None
+
+        return depth == len(hierarchy)
+        
+    # def level(self, ):
     
     def _filter_dimension_cuts(self, dimension, exclude=False):
         dimension = self.cube.dimension(dimension)
@@ -647,6 +734,20 @@ def cuts_from_string(string):
         date:2004,1|class=5
         date:2004,1,1|category:5,10,12|class:5
 
+    Ranges are in form ``from-to`` with possibility of open range::
+
+        date:2004-2010
+        date:2004,5-2010,3
+        date:2004,5-2010
+        date:2004,5-
+        date:-2010
+    
+    Sets are in form ``path1+path2+path3`` (none of the paths should be
+    empty)::
+    
+        date:2004+2010
+        date:2004+2005,1+2010,10
+
     Grammar::
     
         <list> ::= <cut> | <cut> '|' <list>
@@ -661,41 +762,106 @@ def cuts_from_string(string):
     if not string:
         return []
     
-    cut_strings = string.split(CUT_STRING_SEPARATOR)
-
     cuts = []
-    
-    for cut_string in cut_strings:
-        (dimension_name, path_string) = cut_string.split(DIMENSION_STRING_SEPARATOR)
-        
-        path = path_string.split(PATH_STRING_SEPARATOR)
-        if not path:
-            path = []
-        cut = PointCut(dimension_name, path)
-        cuts.append(cut)
+
+    dim_cuts = string.split(CUT_STRING_SEPARATOR)
+    for dim_cut in dim_cuts:
+        (dimension, cut_string) = dim_cut.split(DIMENSION_STRING_SEPARATOR)
+        cuts.append(cut_from_string(dimension, cut_string))
         
     return cuts
 
+re_element = re.compile(r"^[\w,]*$")
+re_point = re.compile(r"^[\w,]*$")
+re_set = re.compile(r"^([\w,]+)(\+([\w,]+))+$")
+re_range = re.compile(r"^([\w,]*)-([\w,]*)$")
+
+def cut_from_string(dimension, string):
+    """Returns a cut from `string` with dimension `dimension. The string
+    should match one of the following patterns:
+    
+    * point cut: ``2010,2,4``
+    * range cut: ``2010-2012``, ``2010,1-2012,3,5``, ``2010,1-`` (open range)
+    * set cut: ``2010+2012``, ``2010,1+2012,3,5+2012,10``
+    
+    If the `string` does not match any of the patterns, then exception is
+    raised.
+    """
+    if re_point.match(string):
+        return PointCut(dimension, path_from_string(string))
+    elif re_set.match(string):
+        paths = map(path_from_string, string.split(SET_CUT_SEPARATOR))
+        return SetCut(dimension, paths)
+    elif re_range.match(string):
+        (from_path, to_path) = map(path_from_string, string.split(RANGE_CUT_SEPARATOR))
+        return RangeCut(dimension, from_path, to_path)
+    else:
+        raise Exception("Unknown cut format (check that keys "
+                        "consist only of of alphanumeric characters and "
+                        "underscore)")
+                        
+def cut_from_dict(desc, cube=None):
+    """Returns a cut from `desc` dictionary. If `cube` is specified, then the
+    dimension is looked up in the cube and set as `Dimension` instances, if
+    specified as strings."""
+
+    cut_type = desc["type"].lower()
+
+    dim = desc.get("dimension")
+
+    if dim and cube:
+        dim = cube.dimension(dim)
+        
+    if cut_type == "point":
+        return PointCut(dim, desc.get("path"))
+    elif cut_type == "set":
+        return SetCut(dim, desc.get("paths"))
+    elif cut_type == "range":
+        return RangeCut(dim, desc.get("from"), desc.get("to"))
+    else:
+        raise ArgumentError("Unknown cut type %s" % cut_type)
+    
 def string_from_cuts(cuts):
-    """Returns a string represeting cuts. String can be used in URLs"""
+    """Returns a string represeting `cuts`. String can be used in URLs"""
     strings = [str(cut) for cut in cuts]
     string = CUT_STRING_SEPARATOR.join(strings)
     return string
 
 def string_from_path(path):
-    """Returns a string representing dimension path."""
+    """Returns a string representing dimension `path`. If `path` is ``None``
+    or empty, then returns empty string. The ptah elements are comma ``,``
+    spearated.
+    
+    Raises `ValueError` when path elements contain characters that are not
+    allowed in path element (alphanumeric and underscore ``_``)."""
+
+    if not path:
+        return ""
     
     # FIXME: do some escaping or something like URL encoding
     path = [unicode(s) if s is not None else "" for s in path]
+    
+    if not all(map(re_element.match, path)):
+        raise ArgumentError("Can not convert path to string: "
+                            "keys contain invalid characters "
+                            "(should be alpha-numeric or underscore)")
+        
     string = PATH_STRING_SEPARATOR.join(path)
     return string
     
 def path_from_string(string):
-    """Returns a dimension path from string"""
+    """Returns a dimension point path from `string`. The path elements are
+    separated by comma ``,`` character.
     
-    # FIXME: do some un-escaping when escaping in string_from_path is implemented
+    Returns an empty list when string is empty or ``None``.
+    """
+    
+    if not string:
+        return []
+        
     path = string.split(PATH_STRING_SEPARATOR)
     path = [v if v != "" else None for v in path]
+
     return path
 
 class Cut(object):
@@ -705,8 +871,16 @@ class Cut(object):
     def to_dict(self):
         """Returns dictionary representation fo the receiver. The keys are:
         `dimension`."""
-        d = {"dimension": self.dimension.name}
+        d = { 
+            "dimension": str(self.dimension),
+            "level_depth": self.level_depth()
+        }
         return d
+    
+    def level_depth(self):
+        """Returns deepest level number. Subclasses should implement this
+        method"""
+        raise NotImplementedError
         
 class PointCut(Cut):
     """Object describing way of slicing a cube (cell) through point in a
@@ -782,7 +956,12 @@ class RangeCut(Cut):
     def level_depth(self):
         """Returns index of deepest level which is equivalent to the longest
         path."""
-        return max(len(self.from_path), len(self.to_path))
+        if self.from_path and not self.to_path:
+            return len(self.from_path)
+        elif not self.from_path and self.to_path:
+            return len(self.to_path)
+        else:
+            return max(len(self.from_path), len(self.to_path))
     
     def __str__(self):
         """Return string representation of point cut, you can use it in
@@ -791,6 +970,7 @@ class RangeCut(Cut):
             from_path_str = string_from_path(self.from_path)
         else:
             from_path_str = string_from_path([])
+
         if self.to_path:
             to_path_str = string_from_path(self.to_path)
         else:
@@ -801,7 +981,7 @@ class RangeCut(Cut):
         else:
             dim_name = self.dimension.name
 
-        range_stsr = from_path_str + RANGE_CUT_SEPARATOR + to_path_str
+        range_str = from_path_str + RANGE_CUT_SEPARATOR + to_path_str
         string = dim_name + DIMENSION_STRING_SEPARATOR + range_str
 
         return string        
@@ -841,7 +1021,7 @@ class SetCut(Cut):
         `dimension`, `type`=``range`` and `set` as a list of paths."""
         d = super(SetCut, self).to_dict()
         d["type"] = "set"
-        d["paths"] = paths
+        d["paths"] = self.paths
         return d
 
     def level_depth(self):
@@ -863,7 +1043,7 @@ class SetCut(Cut):
         set_string = SET_CUT_SEPARATOR.join(path_strings)
         string = dim_name + DIMENSION_STRING_SEPARATOR + set_string
 
-        return string        
+        return string
 
     def __repr__(self):
         if type(self.dimension) == str:
@@ -884,9 +1064,11 @@ class SetCut(Cut):
     def __ne__(self, other):
         return not self.__eq__(other)
 
+DrilldownRow = namedtuple("DrilldownRow", ["key", "label", "path", "record"])
+
 class AggregationResult(object):
     """Result of aggregation or drill down.
-    
+
     Attributes:
 
     * `summary` - dictionary of summary row fields
@@ -894,7 +1076,7 @@ class AggregationResult(object):
     * `remainder` - summary of remaining cells (not yet implemented)
     * `total_cell_count` - number of total cells in drill-down (after limit,
       before pagination)
-    
+
     """
     def __init__(self):
         super(AggregationResult, self).__init__()
@@ -902,31 +1084,28 @@ class AggregationResult(object):
         self.drilldown = []
         self.remainder = {}
         self.total_cell_count = None
-    
+        self.cell = None
 
-    def as_dict(self):
-        """Depreciated, use to_dict instead. """
-        # FIXME: remove this
-        raise DeprecationWarning
-        return self.to_dict()
-        
     def to_dict(self):
         """Return dictionary representation of the aggregation result. Can be
         used for JSON serialisation."""
-        
+
         d = {}
-        
+
         d["summary"] = self.summary
         d["drilldown"] = self.drilldown
         d["remainder"] = self.remainder
         d["total_cell_count"] = self.total_cell_count
-        
+
+        if self.cell:
+            d["cell"] = [cut.to_dict() for cut in self.cell.cuts]
+
         return d
 
     def as_json(self):
-        # FIXME: Eiter depreciate this or move it into backend. Also provide option for iterable
-        # result
-        
+        # FIXME: Eiter depreciate this or move it into backend. Also provide
+        # option for iterable result
+
         def default(o):
             if type(o) == decimal.Decimal:
                 return float(o)
@@ -937,3 +1116,130 @@ class AggregationResult(object):
         json_string = encoder.encode(self.as_dict())
 
         return json_string
+        
+    def drilldown_rows(self, dimension, depth=None):
+        """Returns iterator of drill-down rows which yields a named tuple with
+        named attributes: (key, label, path, record). `depth` is last level of
+        interest. If not specified (set to ``None``) then deepest level for
+        `dimension` is used.
+
+        * `key`: value of key dimension attribute at level of interest
+        * `label`: value of label dimension attribute at level of interest
+        * `path`: full path for the drilled-down cell
+        * `record`: all drill-down attributes of the cell
+
+        Example use::
+
+            for row in result.drilldown_rows(dimension):
+                print "%s: %s" % (row.label, row.record["record_count"])
+
+
+        `dimension` has to be :class:`cubes.Dimension` object. Raises
+        `TypeError` when cut for `dimension` is not `PointCut`.
+        
+        
+        """
+
+        cut = self.cell.cut_for_dimension(dimension)
+
+        if cut and not isinstance(cut, PointCut):
+            raise TypeError("PointCut expected for drill down iterator dimension '%s' cut (was %s)" % (dimension, type(cut)))
+
+        path = cut.path if cut else []
+
+        # FIXME: use hierarchy from cut (when implemented)
+        hierarchy = dimension.hierarchy()
+
+        if depth:
+            current_level = hierarchy[depth-1]
+        else:
+            levels = hierarchy.levels_for_path(path, drilldown=True)
+            current_level = levels[-1]
+            
+        level_key = current_level.key.full_name()
+        level_label = current_level.label_attribute.ref()
+
+        for record in self.drilldown:
+            drill_path = path[:] + [record[level_key]]
+
+            row = DrilldownRow(record[level_key],
+                               record[level_label],
+                               drill_path,
+                               record)
+            yield row
+
+    def cross_table(self, onrows, oncolumns, measures=None):
+        """
+        Creates a cross table from result's drilldown. `onrows`
+        contains list of attribute names to be placed at rows and `oncolumns`
+        contains list of attribute names to be placet at columns. `measures` is a
+        list of measures to be put into cells. If measures are not specified, then
+        only ``record_count`` is used.
+
+        Returns a named tuble with attributes:
+
+        * `columns` - labels of columns. The tuples correspond to values of
+          attributes in `oncolumns`.
+        * `rows` - labels of rows as list of tuples. The tuples correspond to
+          values of attributes in `onrows`.
+        * `data` - list of measure data per row. Each row is a list of measure
+          tuples.
+
+        .. warning::
+
+            Experimental implementation. Interface might change - either
+            arguments or result object.
+
+        """
+
+        return cross_table(self.drilldown, onrows, oncolumns, measures)
+
+CrossTable = namedtuple("CrossTable", ["columns", "rows", "data"])
+
+def cross_table(drilldown, onrows, oncolumns, measures=None):
+    """
+    Creates a cross table from a drilldown (might be any list of records).
+    `onrows` contains list of attribute names to be placed at rows and
+    `oncolumns` contains list of attribute names to be placet at columns.
+    `measures` is a list of measures to be put into cells. If measures are not
+    specified, then only ``record_count`` is used.
+
+    Returns a named tuble with attributes:
+
+    * `columns` - labels of columns. The tuples correspond to values of
+      attributes in `oncolumns`.
+    * `rows` - labels of rows as list of tuples. The tuples correspond to
+      values of attributes in `onrows`.
+    * `data` - list of measure data per row. Each row is a list of measure
+      tuples.
+
+    .. warning::
+
+        Experimental implementation. Interface might change - either
+        arguments or result object.
+
+    """
+
+    matrix = {}
+    row_hdrs = []
+    column_hdrs = []
+
+    measures = measures or ["record_count"]
+
+    for record in drilldown:
+        hrow = tuple(record[f] for f in onrows)
+        hcol = tuple(record[f] for f in oncolumns)
+
+        if not hrow in row_hdrs:
+            row_hdrs.append(hrow)
+        if not hcol in column_hdrs:
+            column_hdrs.append(hcol)
+
+        matrix[(hrow, hcol)] = tuple(record[m] for m in measures)
+
+    data = []
+    for hrow in row_hdrs:
+        row = [matrix.get((hrow, hcol)) for hcol in column_hdrs]
+        data.append(row)
+
+    return CrossTable(column_hdrs, row_hdrs, data)

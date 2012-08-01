@@ -7,7 +7,7 @@ if sys.version_info < (2,7):
 
 setup(
     name = "cubes",
-    version = '0.8.1',
+    version = '0.9.1',
 
     # Project uses reStructuredText, so ensure that the docutils get
     # installed or upgraded on the target machine
@@ -21,7 +21,7 @@ setup(
     },
 
     scripts = ['bin/slicer'],
-    
+
     classifiers = [
         'Development Status :: 5 - Production/Stable',
         'Intended Audience :: Developers',
@@ -32,13 +32,13 @@ setup(
         'Topic :: Scientific/Engineering',
         'Topic :: Utilities'
     ],
-    
-    test_suite = "cubes.tests.suite",
+
+    test_suite = "tests",
 
     # metadata for upload to PyPI
     author = "Stefan Urbanek",
     author_email = "stefan.urbanek@gmail.com",
-    description = "Framework for Online Analytical Processing (OLAP), multidimensional analysis and cube precomputation",
+    description = "Lightweight framework for Online Analytical Processing (OLAP) and multidimensional analysis",
     license = "MIT license with following addition: If your version of the Software supports interaction with it remotely through a computer network, the above copyright notice and this permission notice shall be accessible to all users.",
     keywords = "olap multidimensional data analysis",
     url = "http://databrewery.org"

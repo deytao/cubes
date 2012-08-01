@@ -7,13 +7,16 @@ import sqlalchemy
 from sqlalchemy import Table, Column, Integer, Float, String, MetaData, ForeignKey
 from sqlalchemy import create_engine
 
-from cubes.backends.sql import StarBrowser, coalesce_physical
+from cubes.backends.sql import coalesce_physical
+from cubes.backends.sql.star import *
+from cubes.errors import *
 
 class StarSQLTestCase(unittest.TestCase):
     def setUp(self):
         model_desc = {
-            "cubes": {
-                "sales" : {
+            "cubes": [
+                {
+                    "name": "sales",
                     "measures": [ 
                             {"name":"amount", "aggregations":["sum", "min"]}, 
                             "discount"
@@ -35,7 +38,7 @@ class StarSQLTestCase(unittest.TestCase):
                         "product.subcategory_name.sk": "dim_category.subcategory_name_sk"
                     }
                 }
-            },
+            ],
             "dimensions" : [
                 {
                     "name": "date",
@@ -114,7 +117,7 @@ class StarSQLTestCase(unittest.TestCase):
         metadata.create_all(engine)
         self.metadata = metadata
 
-        self.model = cubes.Model(**model_desc)
+        self.model = cubes.create_model(model_desc)
         self.cube = self.model.cube("sales")
         self.browser = StarBrowser(self.cube,connectable=self.connection, 
                                     dimension_prefix="dim_")
@@ -204,16 +207,20 @@ class StarSQLAttributeMapperTestCase(StarSQLTestCase):
             ref = coalesce_physical(actual, default)
             self.assertEqual(expected, ref)
             
-        assertPhysical((None, "table", "column"), "table.column")
-        assertPhysical((None, "table", "column.foo"), "table.column.foo")
-        assertPhysical((None, "table", "column"), ["table", "column"])
-        assertPhysical(("schema", "table", "column"), ["schema","table", "column"])
-        assertPhysical((None, "table", "column"), {"column":"column"}, "table")
-        assertPhysical((None, "table", "column"), {"table":"table",
+        assertPhysical((None, "table", "column", None), "table.column")
+        assertPhysical((None, "table", "column.foo", None), "table.column.foo")
+        assertPhysical((None, "table", "column", None), ["table", "column"])
+        assertPhysical(("schema", "table", "column", None), ["schema","table", "column"])
+        assertPhysical((None, "table", "column", None), {"column":"column"}, "table")
+        assertPhysical((None, "table", "column", None), {"table":"table",
                                                         "column":"column"})
-        assertPhysical(("schema", "table", "column"), {"schema":"schema",
+        assertPhysical(("schema", "table", "column", None), {"schema":"schema",
                                                         "table":"table",
                                                         "column":"column"})
+        assertPhysical(("schema", "table", "column", "day"), {"schema":"schema",
+                                                        "table":"table",
+                                                        "column":"column",
+                                                        "extract":"day"})
 
     def test_physical_refs_flat_dims(self):
         self.cube.fact = None
@@ -246,6 +253,7 @@ class StarSQLAttributeMapperTestCase(StarSQLTestCase):
         self.assertMapping("dim_category.subcategory_name_sk", "product.subcategory_name", "sk")
         self.assertMapping("dim_category.subcategory_name_en", "product.subcategory_name", "de")
 
+
 class QueryContextTestCase(StarSQLTestCase):
     def setUp(self):
         super(QueryContextTestCase, self).setUp()
@@ -261,6 +269,68 @@ class QueryContextTestCase(StarSQLTestCase):
         cols = [column.name for column in statement.columns]
         self.assertEqual(20, len(cols))
         
+    def test_coalesce_drilldown(self):
+        cell = cubes.Cell(self.cube)
+        dim = self.cube.dimension("date")
+
+        drilldown = {"date": "year"}
+        expected = {"date": [dim.level("year")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        drilldown = ["date"]
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        drilldown = {"date": "day"}
+        expected = {"date": [dim.level("year"), dim.level("month"), dim.level("day")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        # Try "next level"
+
+        cut = cubes.PointCut("date", [2010])
+        cell = cubes.Cell(self.cube, [cut])
+
+        drilldown = {"date": "year"}
+        expected = {"date": [dim.level("year")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        drilldown = ["date"]
+        expected = {"date": [dim.level("year"), dim.level("month")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        # Try with range cell
+
+        cut = cubes.RangeCut("date", [2009], [2010])
+        cell = cubes.Cell(self.cube, [cut])
+
+        drilldown = ["date"]
+        expected = {"date": [dim.level("year"), dim.level("month")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        drilldown = {"date":"year"}
+        expected = {"date": [dim.level("year")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        cut = cubes.RangeCut("date", [2009], [2010, 1])
+        cell = cubes.Cell(self.cube, [cut])
+
+        drilldown = ["date"]
+        expected = {"date": [dim.level("year"), dim.level("month"), dim.level("day")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        # Try "last level"
+
+        cut = cubes.PointCut("date", [2010, 1,2])
+        cell = cubes.Cell(self.cube, [cut])
+
+        drilldown = {"date": "day"}
+        expected = {"date": [dim.level("year"), dim.level("month"), dim.level("day")]}
+        self.assertEqual(expected, coalesce_drilldown(cell, drilldown))
+
+        drilldown = ["date"]
+        expected = {"date": [dim.level("year"), dim.level("month")]}
+        self.assertRaises(ArgumentError, coalesce_drilldown, cell, drilldown)
+        
+
 class JoinsTestCase(StarSQLTestCase):
     def setUp(self):
         super(JoinsTestCase, self).setUp()
@@ -305,6 +375,7 @@ class JoinsTestCase(StarSQLTestCase):
         test = sorted([r.detail.table for r in relevant])
         self.assertEqual(["category", "product","subcategory"], test)
         self.assertEqual([None, None, None], [r.alias for r in relevant])
+
 
 class StarValidationTestCase(StarSQLTestCase):
     @unittest.skip("not implemented")
